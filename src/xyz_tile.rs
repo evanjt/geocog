@@ -15,10 +15,12 @@
 //! ```
 
 use std::collections::HashSet;
+use std::f64::consts::PI;
 use proj4rs::proj::Proj;
 use proj4rs::transform::transform;
 
 use crate::cog_reader::CogReader;
+use crate::geometry::projection::{get_proj_string, is_geographic_crs};
 
 /// Extracted tile data with band information
 #[derive(Debug, Clone)]
@@ -62,20 +64,41 @@ impl BoundingBox {
     }
 }
 
-/// Get PROJ string for an EPSG code from the crs-definitions database
-fn epsg_to_proj_string(epsg: u32) -> Option<&'static str> {
-    u16::try_from(epsg).ok()
-        .and_then(crs_definitions::from_code)
-        .map(|def| def.proj4)
+/// Half the earth's circumference in Web Mercator meters
+const HALF_EARTH: f64 = 20037508.342789244;
+
+/// Fast inline conversion from Web Mercator X to longitude (degrees)
+#[inline(always)]
+fn merc_x_to_lon(x: f64) -> f64 {
+    x * 180.0 / HALF_EARTH
 }
 
-/// Check if an EPSG code represents a geographic (lon/lat) CRS
-fn is_geographic_crs(epsg: u32) -> bool {
-    if let Some(proj_str) = epsg_to_proj_string(epsg) {
-        proj_str.contains("+proj=longlat")
-    } else {
-        // Fallback: 4326 and similar are geographic
-        epsg == 4326 || (epsg >= 4000 && epsg < 5000)
+/// Fast inline conversion from Web Mercator Y to latitude (degrees)
+#[inline(always)]
+fn merc_y_to_lat(y: f64) -> f64 {
+    let y_norm = y / HALF_EARTH;
+    (2.0 * (y_norm * PI / 2.0).exp().atan() - PI / 2.0) * 180.0 / PI
+}
+
+/// Transformation strategy - either fast inline math or proj4rs for complex CRS
+enum TransformStrategy {
+    /// Identity - no transform needed (source is already EPSG:3857)
+    Identity,
+    /// Fast inline math for EPSG:3857 to EPSG:4326
+    FastMerc2Geo,
+    /// Generic proj4rs transform for other CRS combinations
+    Proj4rs(CoordTransformer),
+}
+
+impl TransformStrategy {
+    /// Transform coordinates using the appropriate strategy
+    #[inline(always)]
+    fn transform(&self, x: f64, y: f64) -> Result<(f64, f64), String> {
+        match self {
+            TransformStrategy::Identity => Ok((x, y)),
+            TransformStrategy::FastMerc2Geo => Ok((merc_x_to_lon(x), merc_y_to_lat(y))),
+            TransformStrategy::Proj4rs(t) => t.transform(x, y),
+        }
     }
 }
 
@@ -93,9 +116,9 @@ pub struct CoordTransformer {
 impl CoordTransformer {
     /// Create a transformer from EPSG:3857 (Web Mercator) to another CRS
     pub fn from_3857_to(target_epsg: u32) -> Result<Self, String> {
-        let source_str = epsg_to_proj_string(3857)
+        let source_str = get_proj_string(3857)
             .ok_or("EPSG:3857 not supported")?;
-        let target_str = epsg_to_proj_string(target_epsg)
+        let target_str = get_proj_string(target_epsg as i32)
             .ok_or_else(|| format!("EPSG:{} not supported", target_epsg))?;
 
         let source_proj = Proj::from_proj_string(source_str)
@@ -107,7 +130,7 @@ impl CoordTransformer {
             source_proj,
             target_proj,
             source_is_geographic: false, // 3857 is projected (meters)
-            target_is_geographic: is_geographic_crs(target_epsg),
+            target_is_geographic: is_geographic_crs(target_epsg as i32),
         })
     }
 
@@ -169,24 +192,18 @@ pub fn extract_tile_with_extent(
     };
 
     // Create coordinate transformer from EPSG:3857 (tile coords) to source CRS
+    // Use fast inline math for 4326 (most common case), proj4rs for others
     let source_epsg = metadata.crs_code.unwrap_or(3857) as u32;
 
-    // For same-CRS case (3857 to 3857), we can skip transformation
-    let use_identity = source_epsg == 3857;
-    let transformer = if use_identity {
-        None
-    } else {
-        Some(CoordTransformer::from_3857_to(source_epsg)?)
+    let strategy = match source_epsg {
+        3857 => TransformStrategy::Identity,
+        4326 => TransformStrategy::FastMerc2Geo,
+        _ => TransformStrategy::Proj4rs(CoordTransformer::from_3857_to(source_epsg)?),
     };
 
     // Convert extent to source CRS to get geographic extent
-    let (src_minx, src_miny, src_maxx, src_maxy) = if let Some(ref t) = transformer {
-        let (minx, miny) = t.transform(extent_3857.minx, extent_3857.miny)?;
-        let (maxx, maxy) = t.transform(extent_3857.maxx, extent_3857.maxy)?;
-        (minx, miny, maxx, maxy)
-    } else {
-        (extent_3857.minx, extent_3857.miny, extent_3857.maxx, extent_3857.maxy)
-    };
+    let (src_minx, src_miny) = strategy.transform(extent_3857.minx, extent_3857.miny)?;
+    let (src_maxx, src_maxy) = strategy.transform(extent_3857.maxx, extent_3857.maxy)?;
 
     // Calculate how many source pixels would cover this extent at full resolution
     let extent_src_width = ((src_maxx - src_minx) / base_scale[0]).abs().max(1.0) as usize;
@@ -196,7 +213,7 @@ pub fn extract_tile_with_extent(
     let overview_idx = reader.best_overview_for_resolution(extent_src_width, extent_src_height);
 
     // Call the internal function with automatic fallback for empty overviews
-    extract_tile_with_overview(reader, extent_3857, tile_size, overview_idx, transformer)
+    extract_tile_with_overview(reader, extent_3857, tile_size, overview_idx, strategy)
 }
 
 /// Internal function that extracts a tile using a specific overview level (or full resolution if None)
@@ -205,7 +222,7 @@ fn extract_tile_with_overview(
     extent_3857: &BoundingBox,
     tile_size: (usize, usize),
     overview_idx: Option<usize>,
-    transformer: Option<CoordTransformer>,
+    strategy: TransformStrategy,
 ) -> Result<TileData, Box<dyn std::error::Error + Send + Sync>> {
     let (tile_size_x, tile_size_y) = tile_size;
     let metadata = &reader.metadata;
@@ -257,11 +274,7 @@ fn extract_tile_with_overview(
         let merc_y = extent_3857.maxy - (out_y as f64 + 0.5) * out_res_y;
 
         // Transform from Web Mercator to source CRS
-        let (world_x, world_y) = if let Some(ref t) = transformer {
-            t.transform(merc_x, merc_y)?
-        } else {
-            (merc_x, merc_y)
-        };
+        let (world_x, world_y) = strategy.transform(merc_x, merc_y)?;
 
         let src_px = tiepoint[0] + (world_x - tiepoint[3]) / scale[0];
         let src_py = tiepoint[1] + (tiepoint[4] - world_y) / scale[1];
@@ -336,7 +349,7 @@ fn extract_tile_with_overview(
 
     // If all tile reads failed, try falling back to full resolution
     if tile_data_cache.is_empty() && overview_idx.is_some() {
-        return extract_tile_with_overview(reader, extent_3857, tile_size, None, transformer);
+        return extract_tile_with_overview(reader, extent_3857, tile_size, None, strategy);
     }
 
     let num_bands = metadata.bands;
@@ -368,14 +381,10 @@ fn extract_tile_with_overview(
         for out_x in 0..tile_size_x {
             let merc_x = extent_3857.minx + (out_x as f64 + 0.5) * out_res_x;
 
-            // Transform from Web Mercator to source CRS
-            let (world_x, world_y) = if let Some(ref t) = transformer {
-                match t.transform(merc_x, merc_y) {
-                    Ok(coords) => coords,
-                    Err(_) => continue,
-                }
-            } else {
-                (merc_x, merc_y)
+            // Transform from Web Mercator to source CRS (fast inline for 4326)
+            let (world_x, world_y) = match strategy.transform(merc_x, merc_y) {
+                Ok(coords) => coords,
+                Err(_) => continue,
             };
 
             // Inline world_to_pixel for speed
@@ -434,9 +443,9 @@ mod tests {
 
     #[test]
     fn test_epsg_proj_strings() {
-        assert!(epsg_to_proj_string(4326).is_some());
-        assert!(epsg_to_proj_string(3857).is_some());
-        assert!(epsg_to_proj_string(99999).is_none());
+        assert!(get_proj_string(4326).is_some());
+        assert!(get_proj_string(3857).is_some());
+        assert!(get_proj_string(99999).is_none());
     }
 
     #[test]
@@ -445,5 +454,110 @@ mod tests {
         let source_epsg: u32 = 3857;
         let use_identity = source_epsg == 3857;
         assert!(use_identity);
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    
+    #[test]
+    fn test_proj4rs_transform_output() {
+        // Create transformer from 3857 to 4326
+        let transformer = CoordTransformer::from_3857_to(4326).unwrap();
+        
+        // Test various X coordinates (center at 0, edges at ±20037508)
+        let test_points = [
+            (-20037508.342789244, 0.0, "Far West"),
+            (-10018754.0, 0.0, "West"),
+            (0.0, 0.0, "Center"),
+            (10018754.0, 0.0, "East"),
+            (20037508.342789244, 0.0, "Far East"),
+        ];
+        
+        for (x, y, name) in test_points {
+            let (lon, lat) = transformer.transform(x, y).unwrap();
+            println!("{}: merc({:.0}, {:.0}) -> lon={:.6}, lat={:.6}", name, x, y, lon, lat);
+        }
+    }
+}
+
+#[cfg(test)]
+mod global_cog_tests {
+    use super::*;
+    use std::sync::Arc;
+    use crate::cog_reader::CogReader;
+    use crate::range_reader::LocalRangeReader;
+    
+    #[test]
+    fn test_global_cog_center_tile() {
+        // Skip if file doesn't exist
+        let path = "/home/evan/projects/personal/geo/tileyolo/data/viridis/output_cog.tif";
+        if !std::path::Path::new(path).exists() {
+            println!("Skipping: test file not found");
+            return;
+        }
+        
+        let reader = LocalRangeReader::new(path).unwrap();
+        let cog = CogReader::from_reader(Arc::new(reader)).unwrap();
+        
+        println!("COG metadata:");
+        println!("  Width: {}, Height: {}", cog.metadata.width, cog.metadata.height);
+        println!("  CRS: {:?}", cog.metadata.crs_code);
+        if let Some(scale) = &cog.metadata.geo_transform.pixel_scale {
+            println!("  Pixel scale: {:?}", scale);
+        }
+        if let Some(tiepoint) = &cog.metadata.geo_transform.tiepoint {
+            println!("  Tiepoint: {:?}", tiepoint);
+        }
+        
+        // Test tile 1/0/0 - western hemisphere at zoom 1
+        let bbox_1_0_0 = BoundingBox::from_xyz(1, 0, 0);
+        println!("\nTile 1/0/0 extent (3857): minx={:.0}, maxx={:.0}", bbox_1_0_0.minx, bbox_1_0_0.maxx);
+        
+        // Transform extent corners to source CRS (4326)
+        let transformer = CoordTransformer::from_3857_to(4326).unwrap();
+        let (min_lon, min_lat) = transformer.transform(bbox_1_0_0.minx, bbox_1_0_0.miny).unwrap();
+        let (max_lon, max_lat) = transformer.transform(bbox_1_0_0.maxx, bbox_1_0_0.maxy).unwrap();
+        println!("Tile 1/0/0 extent (4326): lon=[{:.2}, {:.2}], lat=[{:.2}, {:.2}]", 
+                 min_lon, max_lon, min_lat, max_lat);
+        
+        let tile = extract_xyz_tile(&cog, 1, 0, 0, (256, 256)).unwrap();
+        
+        // Count non-zero pixels
+        let non_zero = tile.pixels.iter().filter(|&&v| v != 0.0).count();
+        let total = tile.pixels.len();
+        println!("Tile 1/0/0: {}/{} non-zero pixels ({:.1}%)", non_zero, total, non_zero as f64 / total as f64 * 100.0);
+        
+        // Test center tile 1/0/1 (should be fully populated for a global map)
+        let bbox_1_0_1 = BoundingBox::from_xyz(1, 0, 1);
+        let (min_lon, _) = transformer.transform(bbox_1_0_1.minx, bbox_1_0_1.miny).unwrap();
+        let (max_lon, _) = transformer.transform(bbox_1_0_1.maxx, bbox_1_0_1.maxy).unwrap();
+        println!("\nTile 1/0/1 extent (4326): lon=[{:.2}, {:.2}]", min_lon, max_lon);
+        
+        let tile2 = extract_xyz_tile(&cog, 1, 0, 1, (256, 256)).unwrap();
+        let non_zero2 = tile2.pixels.iter().filter(|&&v| v != 0.0).count();
+        println!("Tile 1/0/1: {}/{} non-zero pixels ({:.1}%)", non_zero2, tile2.pixels.len(), non_zero2 as f64 / tile2.pixels.len() as f64 * 100.0);
+
+        // Test tile 1/1/0 - eastern hemisphere (the failing one in the server!)
+        let bbox_1_1_0 = BoundingBox::from_xyz(1, 1, 0);
+        let (min_lon, _) = transformer.transform(bbox_1_1_0.minx, bbox_1_1_0.miny).unwrap();
+        let (max_lon, _) = transformer.transform(bbox_1_1_0.maxx, bbox_1_1_0.maxy).unwrap();
+        println!("\nTile 1/1/0 extent (4326): lon=[{:.2}, {:.2}]", min_lon, max_lon);
+
+        let tile3 = extract_xyz_tile(&cog, 1, 1, 0, (256, 256)).unwrap();
+        let non_zero3 = tile3.pixels.iter().filter(|&&v| v != 0.0).count();
+        println!("Tile 1/1/0: {}/{} non-zero pixels ({:.1}%)", non_zero3, tile3.pixels.len(), non_zero3 as f64 / tile3.pixels.len() as f64 * 100.0);
+
+        // Test tile 1/1/1 - eastern southern hemisphere
+        let tile4 = extract_xyz_tile(&cog, 1, 1, 1, (256, 256)).unwrap();
+        let non_zero4 = tile4.pixels.iter().filter(|&&v| v != 0.0).count();
+        println!("Tile 1/1/1: {}/{} non-zero pixels ({:.1}%)", non_zero4, tile4.pixels.len(), non_zero4 as f64 / tile4.pixels.len() as f64 * 100.0);
+
+        // These should all be 100% for a global dataset
+        assert!(non_zero as f64 / total as f64 > 0.99, "Tile 1/0/0 should be nearly full");
+        assert!(non_zero2 as f64 / tile2.pixels.len() as f64 > 0.99, "Tile 1/0/1 should be nearly full");
+        assert!(non_zero3 as f64 / tile3.pixels.len() as f64 > 0.99, "Tile 1/1/0 should be nearly full");
+        assert!(non_zero4 as f64 / tile4.pixels.len() as f64 > 0.99, "Tile 1/1/1 should be nearly full");
     }
 }

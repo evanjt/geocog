@@ -31,14 +31,14 @@ pub fn mercator_to_lon_lat(x: f64, y: f64) -> (f64, f64) {
 }
 
 /// Get PROJ4 string for an EPSG code using the crs-definitions database
-fn get_proj_string(epsg: i32) -> Option<&'static str> {
+pub fn get_proj_string(epsg: i32) -> Option<&'static str> {
     u16::try_from(epsg).ok()
         .and_then(crs_definitions::from_code)
         .map(|def| def.proj4)
 }
 
 /// Check if an EPSG code represents a geographic (lon/lat) CRS
-fn is_geographic_crs(epsg: i32) -> bool {
+pub fn is_geographic_crs(epsg: i32) -> bool {
     // Geographic CRS codes are typically in the 4000-4999 range
     // but we check the proj string to be sure
     if let Some(proj_str) = get_proj_string(epsg) {
