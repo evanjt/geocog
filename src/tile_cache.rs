@@ -1,7 +1,6 @@
 use lru::LruCache;
 use std::cmp::max;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const CACHE_CAPACITY_BYTES: usize = 512 * 1024 * 1024; // 512 MB upper bound
@@ -12,28 +11,32 @@ pub enum TileKind {
     Lzw,
 }
 
+/// Key for cached decompressed tiles
+/// Includes source identifier, tile index, and optional overview index
 #[derive(Clone, Eq, PartialEq)]
 struct TileKey {
-    path: Arc<str>,
-    kind: TileKind,
-    index: u32,
+    /// Source identifier (file path or URL)
+    source: Arc<str>,
+    /// Tile index within the IFD
+    tile_index: u32,
+    /// Overview index (None = full resolution, Some(n) = overview n)
+    overview_idx: Option<u16>,
 }
 
 impl Hash for TileKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.path.hash(state);
-        self.kind.hash(state);
-        self.index.hash(state);
+        self.source.hash(state);
+        self.tile_index.hash(state);
+        self.overview_idx.hash(state);
     }
 }
 
 impl TileKey {
-    fn new(path: &Path, kind: TileKind, index: usize) -> Self {
-        let path_str: Box<str> = path.to_string_lossy().into_owned().into_boxed_str();
+    fn new(source: &str, tile_index: usize, overview_idx: Option<usize>) -> Self {
         TileKey {
-            path: Arc::from(path_str),
-            kind,
-            index: index as u32,
+            source: Arc::from(source),
+            tile_index: tile_index as u32,
+            overview_idx: overview_idx.map(|i| i as u16),
         }
     }
 }
@@ -93,22 +96,53 @@ static TILE_CACHE: std::sync::LazyLock<Mutex<TileCache>> = std::sync::LazyLock::
     Mutex::new(TileCache::new(cap))
 });
 
-fn make_key(path: &Path, kind: TileKind, index: usize) -> TileKey {
-    TileKey::new(path, kind, index)
+fn make_key(source: &str, tile_index: usize, overview_idx: Option<usize>) -> TileKey {
+    TileKey::new(source, tile_index, overview_idx)
 }
 
-pub fn get(path: &Path, kind: TileKind, index: usize) -> Option<Arc<Vec<f32>>> {
-    let key = make_key(path, kind, index);
+/// Get a cached tile by source identifier, tile index, and optional overview index
+/// - `source`: File path or URL identifying the COG
+/// - `tile_index`: Tile index within the IFD
+/// - `overview_idx`: None for full resolution, Some(n) for overview n
+pub fn get(source: &str, tile_index: usize, overview_idx: Option<usize>) -> Option<Arc<Vec<f32>>> {
+    let key = make_key(source, tile_index, overview_idx);
     TILE_CACHE.lock().unwrap().get(&key)
 }
 
-pub fn contains(path: &Path, kind: TileKind, index: usize) -> bool {
-    let key = make_key(path, kind, index);
+/// Check if a tile is cached
+pub fn contains(source: &str, tile_index: usize, overview_idx: Option<usize>) -> bool {
+    let key = make_key(source, tile_index, overview_idx);
     TILE_CACHE.lock().unwrap().contains(&key)
 }
 
-pub fn insert(path: &Path, kind: TileKind, index: usize, data: Arc<Vec<f32>>) {
+/// Insert a decompressed tile into the cache
+pub fn insert(source: &str, tile_index: usize, overview_idx: Option<usize>, data: Arc<Vec<f32>>) {
     let size_bytes = data.len() * std::mem::size_of::<f32>();
-    let key = make_key(path, kind, index);
+    let key = make_key(source, tile_index, overview_idx);
     TILE_CACHE.lock().unwrap().insert(key, data, size_bytes);
+}
+
+// ============================================================================
+// Legacy API for backward compatibility with tiff_chunked.rs and lzw_fallback.rs
+// These will be phased out once those modules are updated
+// ============================================================================
+
+use std::path::Path;
+
+/// Legacy get function for backward compatibility
+pub fn get_legacy(path: &Path, _kind: TileKind, index: usize) -> Option<Arc<Vec<f32>>> {
+    let source = path.to_string_lossy();
+    get(&source, index, None)
+}
+
+/// Legacy contains function for backward compatibility
+pub fn contains_legacy(path: &Path, _kind: TileKind, index: usize) -> bool {
+    let source = path.to_string_lossy();
+    contains(&source, index, None)
+}
+
+/// Legacy insert function for backward compatibility
+pub fn insert_legacy(path: &Path, _kind: TileKind, index: usize, data: Arc<Vec<f32>>) {
+    let source = path.to_string_lossy();
+    insert(&source, index, None, data);
 }

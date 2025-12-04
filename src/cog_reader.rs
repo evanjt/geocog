@@ -11,8 +11,10 @@
 //! - Data type detection from TIFF tags (no trial-and-error)
 //! - CRS detection from `GeoKey` directory
 //! - Single transform inversion per tile (not per pixel)
+//! - Global LRU tile cache for decompressed data
 
 use crate::range_reader::{create_range_reader, RangeReader};
+use crate::tile_cache;
 use crate::tiff_utils::AnyResult;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -498,7 +500,15 @@ impl CogReader {
     }
 
     /// Read a tile from a specific overview level
+    /// Uses global LRU cache to avoid re-decompressing tiles
     pub fn read_overview_tile(&self, overview_idx: usize, tile_index: usize) -> AnyResult<Vec<f32>> {
+        let source_id = self.reader.identifier();
+
+        // Check cache first
+        if let Some(cached) = tile_cache::get(source_id, tile_index, Some(overview_idx)) {
+            return Ok((*cached).clone());
+        }
+
         let ovr = self.overviews.get(overview_idx)
             .ok_or_else(|| format!("Overview index {overview_idx} out of range"))?;
 
@@ -537,15 +547,28 @@ impl CogReader {
             self.metadata.data_type.bytes_per_sample(),
         )?;
 
-        convert_to_f32(
+        let result = convert_to_f32(
             &unpredicted,
             self.metadata.data_type,
             self.metadata.little_endian,
-        )
+        )?;
+
+        // Cache the result
+        tile_cache::insert(source_id, tile_index, Some(overview_idx), Arc::new(result.clone()));
+
+        Ok(result)
     }
 
     /// Read a single tile's raw data and decompress
+    /// Uses global LRU cache to avoid re-decompressing tiles
     pub fn read_tile(&self, tile_index: usize) -> AnyResult<Vec<f32>> {
+        let source_id = self.reader.identifier();
+
+        // Check cache first (None for overview_idx means full resolution)
+        if let Some(cached) = tile_cache::get(source_id, tile_index, None) {
+            return Ok((*cached).clone());
+        }
+
         if tile_index >= self.metadata.tile_offsets.len() {
             return Err(format!(
                 "Tile index {} out of range (max {})",
@@ -586,11 +609,16 @@ impl CogReader {
         )?;
 
         // Convert to f32
-        convert_to_f32(
+        let result = convert_to_f32(
             &unpredicted,
             self.metadata.data_type,
             self.metadata.little_endian,
-        )
+        )?;
+
+        // Cache the result
+        tile_cache::insert(source_id, tile_index, None, Arc::new(result.clone()));
+
+        Ok(result)
     }
 
     /// Sample a single pixel value

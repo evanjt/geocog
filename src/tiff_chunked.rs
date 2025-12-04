@@ -163,7 +163,7 @@ impl TiffChunkedRasterSource {
             };
 
             for neighbor in neighbors {
-                if tile_cache::contains(&config.path, TileKind::Chunked, neighbor) {
+                if tile_cache::contains_legacy(&config.path, TileKind::Chunked, neighbor) {
                     continue;
                 }
 
@@ -176,7 +176,7 @@ impl TiffChunkedRasterSource {
                         cfg.chunk_height,
                         cfg.samples_per_pixel,
                     ) {
-                        tile_cache::insert(&cfg.path, TileKind::Chunked, neighbor, tile);
+                        tile_cache::insert_legacy(&cfg.path, TileKind::Chunked, neighbor, tile);
                     }
                 });
             }
@@ -194,12 +194,12 @@ impl TiffChunkedRasterSource {
     }
 
     fn fetch_chunk(&self, chunk_index: usize) -> AnyResult<Arc<Vec<f32>>> {
-        if let Some(entry) = tile_cache::get(&self.path, TileKind::Chunked, chunk_index) {
+        if let Some(entry) = tile_cache::get_legacy(&self.path, TileKind::Chunked, chunk_index) {
             return Ok(entry);
         }
 
         let entry = self.load_chunk(chunk_index)?;
-        tile_cache::insert(
+        tile_cache::insert_legacy(
             &self.path,
             TileKind::Chunked,
             chunk_index,

@@ -363,12 +363,12 @@ impl LzwRasterSource {
     }
 
     fn fetch_tile(&self, tile_index: usize) -> AnyResult<Arc<Vec<f32>>> {
-        if let Some(cached) = tile_cache::get(&self.path, TileKind::Lzw, tile_index) {
+        if let Some(cached) = tile_cache::get_legacy(&self.path, TileKind::Lzw, tile_index) {
             return Ok(cached);
         }
 
         let tile = self.load_tile(tile_index)?;
-        tile_cache::insert(&self.path, TileKind::Lzw, tile_index, Arc::clone(&tile));
+        tile_cache::insert_legacy(&self.path, TileKind::Lzw, tile_index, Arc::clone(&tile));
         self.prefetch_neighbors(tile_index);
         Ok(tile)
     }
@@ -423,7 +423,7 @@ impl LzwRasterSource {
             };
 
             for neighbor in neighbors {
-                if tile_cache::contains(&config.path, TileKind::Lzw, neighbor) {
+                if tile_cache::contains_legacy(&config.path, TileKind::Lzw, neighbor) {
                     continue;
                 }
 
@@ -440,7 +440,7 @@ impl LzwRasterSource {
                         cfg.bytes_per_sample,
                         neighbor,
                     ) {
-                        tile_cache::insert(&cfg.path, TileKind::Lzw, neighbor, tile);
+                        tile_cache::insert_legacy(&cfg.path, TileKind::Lzw, neighbor, tile);
                     }
                 });
             }
