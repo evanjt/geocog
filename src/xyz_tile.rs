@@ -77,8 +77,10 @@ fn merc_x_to_lon(x: f64) -> f64 {
 /// Fast inline conversion from Web Mercator Y to latitude (degrees)
 #[inline(always)]
 fn merc_y_to_lat(y: f64) -> f64 {
-    let y_norm = y / HALF_EARTH;
-    (2.0 * (y_norm * PI / 2.0).exp().atan() - PI / 2.0) * 180.0 / PI
+    // y in meters -> y in radians (normalized by earth's extent * PI)
+    let y_rad = y * PI / HALF_EARTH;
+    // Inverse Mercator: lat = 2 * atan(exp(y_rad)) - PI/2
+    (2.0 * y_rad.exp().atan() - PI / 2.0) * 180.0 / PI
 }
 
 /// Transformation strategy - either fast inline math or proj4rs for complex CRS
