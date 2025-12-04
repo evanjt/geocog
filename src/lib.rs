@@ -46,7 +46,7 @@ pub mod xyz_tile;
 // Re-export main types
 pub use cog_reader::{CogReader, CogMetadata, CogDataType, Compression, GeoTransform, OverviewMetadata};
 pub use geometry::projection::{project_point, lon_lat_to_mercator, mercator_to_lon_lat, get_proj_string, is_geographic_crs};
-pub use range_reader::RangeReader;
+pub use range_reader::{RangeReader, MemoryRangeReader};
 pub use raster::RasterSource;
 pub use s3::{S3Config, S3RangeReaderAsync, S3RangeReaderSync};
 pub use tile_cache::TileCache;

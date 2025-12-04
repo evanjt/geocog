@@ -51,6 +51,68 @@ impl LocalRangeReader {
     }
 }
 
+/// In-memory range reader for bytes already loaded into memory
+///
+/// This is useful when you have already fetched COG data (e.g., from a cache
+/// or network) and want to parse it without writing to disk.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use geocog::{CogReader, MemoryRangeReader};
+/// use std::sync::Arc;
+///
+/// let bytes = std::fs::read("path/to/file.tif")?;
+/// let reader = MemoryRangeReader::new(bytes, "cached://my-layer.tif".to_string());
+/// let cog = CogReader::from_reader(Arc::new(reader))?;
+/// ```
+pub struct MemoryRangeReader {
+    data: Arc<Vec<u8>>,
+    identifier: String,
+}
+
+impl MemoryRangeReader {
+    /// Create a new MemoryRangeReader from a byte vector
+    ///
+    /// # Arguments
+    /// * `data` - The COG file bytes
+    /// * `identifier` - A human-readable identifier for logging (e.g., "memory://layer.tif")
+    pub fn new(data: Vec<u8>, identifier: String) -> Self {
+        Self {
+            data: Arc::new(data),
+            identifier,
+        }
+    }
+
+    /// Create from an Arc<Vec<u8>> to avoid cloning large buffers
+    pub fn from_arc(data: Arc<Vec<u8>>, identifier: String) -> Self {
+        Self { data, identifier }
+    }
+}
+
+impl RangeReader for MemoryRangeReader {
+    fn read_range(&self, offset: u64, length: usize) -> AnyResult<Vec<u8>> {
+        let start = offset as usize;
+        let end = (start + length).min(self.data.len());
+        if start >= self.data.len() {
+            return Ok(vec![]);
+        }
+        Ok(self.data[start..end].to_vec())
+    }
+
+    fn size(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    fn is_local(&self) -> bool {
+        true // Memory is fast, treat as local
+    }
+}
+
 impl RangeReader for LocalRangeReader {
     fn read_range(&self, offset: u64, length: usize) -> AnyResult<Vec<u8>> {
         let mut file = File::open(&self.path)?;
@@ -238,5 +300,40 @@ mod tests {
 
         let data = reader.read_range(7, 5).unwrap();
         assert_eq!(&data, b"World");
+    }
+
+    #[test]
+    fn test_memory_range_reader() {
+        let data = b"Hello, World!".to_vec();
+        let reader = MemoryRangeReader::new(data, "test://memory".to_string());
+
+        assert_eq!(reader.size(), 13);
+        assert_eq!(reader.identifier(), "test://memory");
+        assert!(reader.is_local());
+
+        // Test reading ranges
+        let range1 = reader.read_range(0, 5).unwrap();
+        assert_eq!(&range1, b"Hello");
+
+        let range2 = reader.read_range(7, 5).unwrap();
+        assert_eq!(&range2, b"World");
+
+        // Test reading past end (should return partial data)
+        let range3 = reader.read_range(10, 10).unwrap();
+        assert_eq!(&range3, b"ld!");
+
+        // Test reading from beyond end (should return empty)
+        let range4 = reader.read_range(100, 10).unwrap();
+        assert!(range4.is_empty());
+    }
+
+    #[test]
+    fn test_memory_range_reader_from_arc() {
+        let data = Arc::new(b"Test data".to_vec());
+        let reader = MemoryRangeReader::from_arc(data.clone(), "arc://test".to_string());
+
+        assert_eq!(reader.size(), 9);
+        let result = reader.read_range(0, 4).unwrap();
+        assert_eq!(&result, b"Test");
     }
 }
