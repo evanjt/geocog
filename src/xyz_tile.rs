@@ -374,43 +374,80 @@ fn extract_tile_with_overview(
         tile_data.get(pixel_idx).copied()
     };
 
+    // Pre-compute source X pixel coordinates for each output column
+    // For EPSG:4326, the X transform is linear: lon = merc_x * 180 / HALF_EARTH
+    // Then: src_px = tiepoint[0] + (lon - tiepoint[3]) * inv_scale_x
+    // Simplified: src_px = base_x + col * delta_x where base_x and delta_x are constants
+    let src_px_base = if matches!(strategy, TransformStrategy::FastMerc2Geo) {
+        let lon_base = (extent_3857.minx + 0.5 * out_res_x) * 180.0 / HALF_EARTH;
+        tiepoint[0] + (lon_base - tiepoint[3]) * inv_scale_x
+    } else {
+        // For non-4326, compute first column's X
+        let (world_x, _) = strategy.transform(extent_3857.minx + 0.5 * out_res_x, 0.0).unwrap_or((0.0, 0.0));
+        tiepoint[0] + (world_x - tiepoint[3]) * inv_scale_x
+    };
+
+    let src_px_delta = if matches!(strategy, TransformStrategy::FastMerc2Geo) {
+        // For 4326: delta_lon per column, converted to pixels
+        let lon_delta = out_res_x * 180.0 / HALF_EARTH;
+        lon_delta * inv_scale_x
+    } else if matches!(strategy, TransformStrategy::Identity) {
+        // For 3857: direct merc_x to pixel
+        out_res_x * inv_scale_x
+    } else {
+        // For other CRS, fall back to per-pixel transform
+        0.0
+    };
+
+    let use_precomputed_x = matches!(strategy, TransformStrategy::FastMerc2Geo | TransformStrategy::Identity);
+
     // Sample each output pixel
     for out_y in 0..tile_size_y {
         let merc_y = extent_3857.maxy - (out_y as f64 + 0.5) * out_res_y;
 
-        for out_x in 0..tile_size_x {
-            let merc_x = extent_3857.minx + (out_x as f64 + 0.5) * out_res_x;
+        // Pre-compute world_y for this row (only one Y transform per row)
+        let (_, world_y) = match strategy.transform(extent_3857.minx, merc_y) {
+            Ok(coords) => coords,
+            Err(_) => continue,
+        };
+        let src_py = tiepoint[1] + (tiepoint[4] - world_y) * inv_scale_y;
 
-            // Transform from Web Mercator to source CRS (fast inline for 4326)
-            let (world_x, world_y) = match strategy.transform(merc_x, merc_y) {
-                Ok(coords) => coords,
-                Err(_) => continue,
+        // Early row rejection - if Y is out of bounds, skip entire row
+        if src_py < -0.5 || src_py > eff_height as f64 + 0.5 {
+            continue;
+        }
+
+        let src_py_int = src_py.round() as isize;
+        let src_py_clamped = src_py_int.max(0).min(eff_height as isize - 1) as usize;
+
+        for out_x in 0..tile_size_x {
+            // Use pre-computed X for FastMerc2Geo and Identity
+            let src_px = if use_precomputed_x {
+                src_px_base + (out_x as f64) * src_px_delta
+            } else {
+                // Fall back to per-pixel transform for other CRS
+                let merc_x = extent_3857.minx + (out_x as f64 + 0.5) * out_res_x;
+                let (world_x, _) = match strategy.transform(merc_x, merc_y) {
+                    Ok(coords) => coords,
+                    Err(_) => continue,
+                };
+                tiepoint[0] + (world_x - tiepoint[3]) * inv_scale_x
             };
 
-            // Inline world_to_pixel for speed
-            let src_px = tiepoint[0] + (world_x - tiepoint[3]) * inv_scale_x;
-            let src_py = tiepoint[1] + (tiepoint[4] - world_y) * inv_scale_y;
+            // Check if X is within valid range
+            if src_px < -0.5 || src_px > eff_width as f64 + 0.5 {
+                continue;
+            }
 
-            // Nearest neighbor resampling - preserves crisp edges
             let src_px_int = src_px.round() as isize;
-            let src_py_int = src_py.round() as isize;
+            let src_px_clamped = src_px_int.max(0).min(eff_width as isize - 1) as usize;
 
-            // Clamp to valid pixel range (handles edge cases at ±180° for global datasets)
-            let src_px_clamped = src_px_int.max(0).min(eff_width as isize - 1);
-            let src_py_clamped = src_py_int.max(0).min(eff_height as isize - 1);
+            let out_idx = (out_y * tile_size_x + out_x) * num_bands;
 
-            // Check if original source coordinates are within valid range
-            // Allow up to 0.5 pixel past the edge for global datasets where extent matches exactly
-            if src_px >= -0.5 && src_px <= eff_width as f64 + 0.5 &&
-               src_py >= -0.5 && src_py <= eff_height as f64 + 0.5 {
-
-                let out_idx = (out_y * tile_size_x + out_x) * num_bands;
-
-                // Sample each band with nearest neighbor
-                for band in 0..num_bands {
-                    if let Some(value) = sample_pixel(src_px_clamped as usize, src_py_clamped as usize, band) {
-                        pixel_data[out_idx + band] = value;
-                    }
+            // Sample each band with nearest neighbor
+            for band in 0..num_bands {
+                if let Some(value) = sample_pixel(src_px_clamped, src_py_clamped, band) {
+                    pixel_data[out_idx + band] = value;
                 }
             }
         }
