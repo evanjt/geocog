@@ -1,212 +1,220 @@
-use std::f64::consts::PI;
-use proj::Proj;
-
-/// `WebMercator` constants
-const R_MAJOR: f64 = 6378137.0;
-const MAX_LAT: f64 = 85.05112877980659; // Max bounds for Web Mercator
-
-/// Create a coordinate transformer from EPSG:3857 (Web Mercator) to a target EPSG code
-/// Returns None if source and target are the same (no transform needed), or an error message if transform fails
-pub fn create_transformer(source_epsg: u32) -> Result<Option<Proj>, String> {
-    // If source is already 3857, no transform needed
-    if source_epsg == 3857 {
-        return Ok(None);
+/// Project a point from one CRS to another using pure Rust (proj4rs + crs-definitions).
+///
+/// This function handles coordinate transformations between any EPSG codes supported
+/// by the crs-definitions database (~thousands of codes including UTM zones, national grids, etc).
+///
+/// # Arguments
+/// * `source_epsg` - Source CRS EPSG code
+/// * `target_epsg` - Target CRS EPSG code
+/// * `x` - X coordinate in source CRS
+/// * `y` - Y coordinate in source CRS
+///
+/// # Returns
+/// Tuple of (x, y) in target CRS, or an error if the EPSG code is not supported.
+pub fn project_point(source_epsg: i32, target_epsg: i32, x: f64, y: f64) -> Result<(f64, f64), String> {
+    // No-op if same CRS
+    if source_epsg == target_epsg {
+        return Ok((x, y));
     }
 
-    let source_crs = format!("EPSG:{source_epsg}");
-
-    // Create transformer from 3857 to source CRS
-    Proj::new_known_crs("EPSG:3857", &source_crs, None)
-        .map(Some)
-        .map_err(|e| format!("Failed to create transformer from EPSG:3857 to {source_crs}: {e}"))
+    project_with_proj4rs(source_epsg, target_epsg, x, y)
 }
 
-/// Transform coordinates from EPSG:3857 to the source CRS
-/// If transformer is None (source is 3857), returns coordinates unchanged
-pub fn transform_coords(transformer: &Option<Proj>, x: f64, y: f64) -> (f64, f64) {
-    match transformer {
-        Some(proj) => proj.convert((x, y)).unwrap_or((x, y)),
-        None => (x, y),
-    }
-}
-
-/// from longitude, latitude (degrees) → Web Mercator (x, y in meters)
+/// Convenience function: longitude/latitude (EPSG:4326) to Web Mercator (EPSG:3857)
 pub fn lon_lat_to_mercator(lon: f64, lat: f64) -> (f64, f64) {
-    // clamp latitude into Mercator’s valid range
-    let clamped_lat = lat.clamp(-MAX_LAT, MAX_LAT);
-
-    let x = lon * R_MAJOR * PI / 180.0;
-    let lat_rad = clamped_lat * PI / 180.0;
-    let y = R_MAJOR * ((PI / 4.0 + lat_rad / 2.0).tan().ln());
-    (x, y)
+    project_point(4326, 3857, lon, lat).unwrap_or((lon, lat))
 }
 
-/// from Web Mercator (x, y in meters) → longitude, latitude (degrees)
+/// Convenience function: Web Mercator (EPSG:3857) to longitude/latitude (EPSG:4326)
 pub fn mercator_to_lon_lat(x: f64, y: f64) -> (f64, f64) {
-    let lon = x / (R_MAJOR * PI / 180.0);
-    let lat_rad = 2.0 * ((y / R_MAJOR).exp().atan()) - PI / 2.0;
-    let lat = lat_rad * 180.0 / PI;
-    (lon, lat)
+    project_point(3857, 4326, x, y).unwrap_or((x, y))
+}
+
+/// Get PROJ4 string for an EPSG code using the crs-definitions database
+fn get_proj_string(epsg: i32) -> Option<&'static str> {
+    u16::try_from(epsg).ok()
+        .and_then(crs_definitions::from_code)
+        .map(|def| def.proj4)
+}
+
+/// Check if an EPSG code represents a geographic (lon/lat) CRS
+fn is_geographic_crs(epsg: i32) -> bool {
+    // Geographic CRS codes are typically in the 4000-4999 range
+    // but we check the proj string to be sure
+    if let Some(proj_str) = get_proj_string(epsg) {
+        proj_str.contains("+proj=longlat")
+    } else {
+        // Fallback: assume 4326 and similar are geographic
+        epsg == 4326 || (epsg >= 4000 && epsg < 5000)
+    }
+}
+
+/// Project using proj4rs with EPSG codes from crs-definitions
+fn project_with_proj4rs(source_epsg: i32, target_epsg: i32, x: f64, y: f64) -> Result<(f64, f64), String> {
+    use proj4rs::proj::Proj;
+    use proj4rs::transform::transform;
+
+    let source_str = get_proj_string(source_epsg)
+        .ok_or_else(|| format!("EPSG:{} is not in the crs-definitions database", source_epsg))?;
+    let target_str = get_proj_string(target_epsg)
+        .ok_or_else(|| format!("EPSG:{} is not in the crs-definitions database", target_epsg))?;
+
+    let source_proj = Proj::from_proj_string(source_str)
+        .map_err(|e| format!("Invalid source projection EPSG:{}: {:?}", source_epsg, e))?;
+    let target_proj = Proj::from_proj_string(target_str)
+        .map_err(|e| format!("Invalid target projection EPSG:{}: {:?}", target_epsg, e))?;
+
+    // proj4rs uses radians for geographic coordinates
+    let source_is_geographic = is_geographic_crs(source_epsg);
+    let (x_in, y_in) = if source_is_geographic {
+        (x.to_radians(), y.to_radians())
+    } else {
+        (x, y)
+    };
+
+    let mut point = (x_in, y_in, 0.0);
+    transform(&source_proj, &target_proj, &mut point)
+        .map_err(|e| format!("Transform from EPSG:{} to EPSG:{} failed: {:?}", source_epsg, target_epsg, e))?;
+
+    // Convert back from radians if target is geographic
+    let target_is_geographic = is_geographic_crs(target_epsg);
+    let (out_x, out_y) = if target_is_geographic {
+        (point.0.to_degrees(), point.1.to_degrees())
+    } else {
+        (point.0, point.1)
+    };
+
+    Ok((out_x, out_y))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proj::Proj;
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
 
     const EPS: f64 = 1e-6;
+
     fn approx_eq(a: f64, b: f64) -> bool {
         (a - b).abs() < EPS
     }
 
     #[test]
-    fn test_random_lon_lat_to_mercator_vs_proj() {
-        let proj_merc = Proj::new_known_crs("EPSG:4326", "EPSG:3857", None).unwrap();
-        let mut rng = StdRng::seed_from_u64(42);
-
-        for _ in 0..1_000 {
-            let lon = rng.random_range(-180.0..180.0);
-            let lat = rng.random_range(-85.0..85.0);
-
-            let (x1, y1) = lon_lat_to_mercator(lon, lat);
-            let (x2, y2) = proj_merc.convert((lon, lat)).unwrap();
-
-            assert!(approx_eq(x1, x2));
-            assert!(approx_eq(y1, y2));
-        }
+    fn test_lon_lat_to_mercator_origin() {
+        let (x, y) = lon_lat_to_mercator(0.0, 0.0);
+        assert!(approx_eq(x, 0.0));
+        assert!(approx_eq(y, 0.0));
     }
 
     #[test]
-    fn test_lon_lat_to_mercator_clamps_lat_above_max() {
-        let (x1, y1) = lon_lat_to_mercator(10.0, 90.0);
-        let (x2, y2) = lon_lat_to_mercator(10.0, MAX_LAT);
-        assert!(approx_eq(x1, x2));
-        assert!(approx_eq(y1, y2));
+    fn test_mercator_to_lon_lat_origin() {
+        let (lon, lat) = mercator_to_lon_lat(0.0, 0.0);
+        assert!(approx_eq(lon, 0.0));
+        assert!(approx_eq(lat, 0.0));
     }
 
     #[test]
-    fn test_lon_lat_to_mercator_clamps_lat_below_min() {
-        let (x1, y1) = lon_lat_to_mercator(-20.0, -90.0);
-        let (x2, y2) = lon_lat_to_mercator(-20.0, -MAX_LAT);
-        assert!(approx_eq(x1, x2));
-        assert!(approx_eq(y1, y2));
-    }
-
-    #[test]
-    fn test_random_mercator_to_lon_lat_vs_proj() {
-        let proj_geo = Proj::new_known_crs("EPSG:3857", "EPSG:4326", None).unwrap();
-        let mut rng = StdRng::seed_from_u64(24);
-        let bound = 20037508.342789244;
-
-        for _ in 0..1_000 {
-            let x = rng.random_range(-bound..bound);
-            let y = rng.random_range(-bound..bound);
-            let (lon1, lat1) = mercator_to_lon_lat(x, y);
-            let (lon2, lat2) = proj_geo.convert((x, y)).unwrap();
-            assert!(approx_eq(lon1, lon2));
-            assert!(approx_eq(lat1, lat2));
-        }
-    }
-
-    // ============================================================
-    // NEW TESTS: CRS Transformer functionality
-    // These tests ensure we correctly handle coordinate transformations
-    // for multiple CRS types - the bug that was caught!
-    // ============================================================
-
-    #[test]
-    fn test_create_transformer_3857_returns_none() {
-        // When source is 3857, no transform is needed
-        let result = create_transformer(3857);
-        assert!(result.is_ok(), "Should succeed for EPSG:3857");
-        assert!(result.unwrap().is_none(), "Should return None for same CRS (no transform needed)");
-    }
-
-    #[test]
-    fn test_create_transformer_4326_returns_some() {
-        // When source is 4326, we need a transformer
-        let result = create_transformer(4326);
-        assert!(result.is_ok(), "Should succeed for EPSG:4326");
-        assert!(result.unwrap().is_some(), "Should return Some for different CRS");
-    }
-
-    #[test]
-    fn test_create_transformer_utm_zone() {
-        // Test UTM zone (common for many datasets)
-        // EPSG:32633 is UTM zone 33N
-        let result = create_transformer(32633);
-        assert!(result.is_ok(), "Should succeed for UTM zone EPSG:32633");
-        assert!(result.unwrap().is_some(), "Should return Some for UTM zone");
-    }
-
-    #[test]
-    fn test_transform_coords_no_transform() {
-        // When transformer is None, coords should pass through unchanged
-        let transformer: Option<Proj> = None;
-        let (x, y) = transform_coords(&transformer, 1000.0, 2000.0);
-        assert_eq!(x, 1000.0, "X should be unchanged");
-        assert_eq!(y, 2000.0, "Y should be unchanged");
-    }
-
-    #[test]
-    fn test_transform_coords_3857_to_4326() {
-        // Test actual coordinate transformation from 3857 to 4326
-        let transformer = create_transformer(4326).unwrap();
-
-        // Known point: Web Mercator (0, 0) = Geographic (0, 0)
-        let (lon, lat) = transform_coords(&transformer, 0.0, 0.0);
-        assert!(lon.abs() < 1e-6, "Longitude at origin should be ~0");
-        assert!(lat.abs() < 1e-6, "Latitude at origin should be ~0");
-
-        // Another known point: ~London in 3857
-        // London is approximately at lon=-0.1, lat=51.5
-        // In 3857: x=-11131.95, y=6711665.88
-        let (lon2, lat2) = transform_coords(&transformer, -11131.95, 6711665.88);
-        assert!((lon2 - (-0.1)).abs() < 0.01, "Longitude should be ~-0.1, got {}", lon2);
-        assert!((lat2 - 51.5).abs() < 0.1, "Latitude should be ~51.5, got {}", lat2);
-    }
-
-    #[test]
-    fn test_transform_coords_matches_manual_function() {
-        // Verify that transform_coords with 4326 transformer gives same result
-        // as our manual mercator_to_lon_lat function
-        let transformer = create_transformer(4326).unwrap();
-
+    fn test_roundtrip_4326_3857() {
         let test_points = [
             (0.0, 0.0),
-            (1000000.0, 1000000.0),
-            (-5000000.0, 3000000.0),
-            (10018754.17, 5000000.0),
+            (10.0, 51.5),   // London-ish
+            (-122.4, 37.8), // San Francisco
+            (139.7, 35.7),  // Tokyo
         ];
 
-        for (x, y) in test_points {
-            let (lon1, lat1) = transform_coords(&transformer, x, y);
+        for (lon, lat) in test_points {
+            let (x, y) = lon_lat_to_mercator(lon, lat);
             let (lon2, lat2) = mercator_to_lon_lat(x, y);
-
-            assert!(
-                (lon1 - lon2).abs() < 1e-5,
-                "Longitude mismatch at ({}, {}): proj={}, manual={}",
-                x, y, lon1, lon2
-            );
-            assert!(
-                (lat1 - lat2).abs() < 1e-5,
-                "Latitude mismatch at ({}, {}): proj={}, manual={}",
-                x, y, lat1, lat2
-            );
+            assert!(approx_eq(lon, lon2), "lon: {} != {}", lon, lon2);
+            assert!(approx_eq(lat, lat2), "lat: {} != {}", lat, lat2);
         }
     }
 
     #[test]
-    fn test_transform_handles_edge_coordinates() {
-        // Test coordinates at the edge of Web Mercator extent
-        let transformer = create_transformer(4326).unwrap();
-        let max_extent = 20037508.342789244;
+    fn test_extreme_latitudes() {
+        // proj4rs handles extreme latitudes - verify we get finite values
+        let (_, y1) = lon_lat_to_mercator(0.0, 85.0);
+        let (_, y2) = lon_lat_to_mercator(0.0, -85.0);
+        assert!(y1.is_finite(), "85 deg should produce finite y");
+        assert!(y2.is_finite(), "-85 deg should produce finite y");
+        assert!(y1 > 0.0, "positive lat should give positive y");
+        assert!(y2 < 0.0, "negative lat should give negative y");
+    }
 
-        // Near max extent
-        let (lon, lat) = transform_coords(&transformer, max_extent * 0.99, max_extent * 0.5);
-        assert!(lon.abs() < 180.0, "Longitude should be within ±180");
-        assert!(lat.abs() < 90.0, "Latitude should be within ±90");
+    #[test]
+    fn test_project_point_same_crs() {
+        let result = project_point(4326, 4326, 10.0, 51.5);
+        assert!(result.is_ok());
+        let (x, y) = result.unwrap();
+        assert!(approx_eq(x, 10.0));
+        assert!(approx_eq(y, 51.5));
+    }
+
+    #[test]
+    fn test_project_point_4326_to_3857() {
+        let result = project_point(4326, 3857, 0.0, 0.0);
+        assert!(result.is_ok());
+        let (x, y) = result.unwrap();
+        assert!(approx_eq(x, 0.0));
+        assert!(approx_eq(y, 0.0));
+    }
+
+    #[test]
+    fn test_project_point_3857_to_4326() {
+        let result = project_point(3857, 4326, 0.0, 0.0);
+        assert!(result.is_ok());
+        let (lon, lat) = result.unwrap();
+        assert!(approx_eq(lon, 0.0));
+        assert!(approx_eq(lat, 0.0));
+    }
+
+    #[test]
+    fn test_project_point_via_proj4rs() {
+        // Test a transformation that goes through proj4rs
+        // EPSG:32633 is UTM zone 33N
+        let result = project_point(4326, 32633, 15.0, 52.0);
+        assert!(result.is_ok(), "Should support UTM zones: {:?}", result);
+        let (x, y) = result.unwrap();
+        // UTM coordinates should be in meters, roughly 500000 for easting near zone center
+        assert!(x > 400000.0 && x < 600000.0, "UTM easting: {}", x);
+        assert!(y > 5000000.0 && y < 6000000.0, "UTM northing: {}", y);
+    }
+
+    #[test]
+    fn test_project_point_roundtrip_utm() {
+        // Roundtrip through UTM
+        let lon = 15.0;
+        let lat = 52.0;
+
+        let to_utm = project_point(4326, 32633, lon, lat);
+        assert!(to_utm.is_ok());
+        let (x, y) = to_utm.unwrap();
+
+        let back = project_point(32633, 4326, x, y);
+        assert!(back.is_ok());
+        let (lon2, lat2) = back.unwrap();
+
+        assert!((lon - lon2).abs() < 1e-5, "lon roundtrip: {} -> {}", lon, lon2);
+        assert!((lat - lat2).abs() < 1e-5, "lat roundtrip: {} -> {}", lat, lat2);
+    }
+
+    #[test]
+    fn test_get_proj_string_common_codes() {
+        assert!(get_proj_string(4326).is_some(), "4326 should be in database");
+        assert!(get_proj_string(3857).is_some(), "3857 should be in database");
+        assert!(get_proj_string(32633).is_some(), "UTM 33N should be in database");
+    }
+
+    #[test]
+    fn test_is_geographic_crs() {
+        assert!(is_geographic_crs(4326), "4326 is geographic");
+        assert!(!is_geographic_crs(3857), "3857 is projected");
+        assert!(!is_geographic_crs(32633), "UTM is projected");
+    }
+
+    #[test]
+    fn test_unsupported_epsg_code() {
+        // Use an EPSG code that definitely doesn't exist
+        let result = project_point(4326, 999999, 0.0, 0.0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in the crs-definitions database"));
     }
 }

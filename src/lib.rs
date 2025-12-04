@@ -40,10 +40,13 @@ pub mod s3;
 pub mod tiff_chunked;
 pub mod tiff_utils;
 pub mod tile_cache;
+pub mod xyz_tile;
 
 // Re-export main types
 pub use cog_reader::{CogReader, CogMetadata, CogDataType, Compression, GeoTransform, OverviewMetadata};
+pub use geometry::projection::{project_point, lon_lat_to_mercator, mercator_to_lon_lat};
 pub use range_reader::RangeReader;
 pub use raster::RasterSource;
 pub use s3::{S3Config, S3RangeReaderAsync, S3RangeReaderSync};
 pub use tile_cache::TileCache;
+pub use xyz_tile::{TileData, BoundingBox, extract_xyz_tile, extract_tile_with_extent};

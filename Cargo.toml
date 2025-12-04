@@ -1,6 +1,6 @@
 [package]
 name = "geocog"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "Tools for creating COG-based tilers"
 license = "MIT"
@@ -27,7 +27,8 @@ zstd = "0.13"
 
 # Coordinate transforms
 geo = "0.29.0"
-proj = "0.30.0"
+proj4rs = { version = "0.1.9", features = ["crs-definitions"] }  # Pure Rust with EPSG database
+crs-definitions = "0.3.1"  # EPSG -> PROJ4 string lookups
 
 # Data structures
 ndarray = "0.16.1"
