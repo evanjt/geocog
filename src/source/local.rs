@@ -77,7 +77,7 @@ impl LocalScanOptions {
 /// # Example
 ///
 /// ```rust,ignore
-/// use geocog::source::{LocalCogSource, LocalScanOptions};
+/// use cogrs::source::{LocalCogSource, LocalScanOptions};
 ///
 /// // Scan with default options (recursive)
 /// let source = LocalCogSource::scan("/path/to/data", LocalScanOptions::default())?;

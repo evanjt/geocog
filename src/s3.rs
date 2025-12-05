@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use geocog::S3RangeReaderAsync;
+//! use cogrs::S3RangeReaderAsync;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -131,7 +131,7 @@ impl S3RangeReaderAsync {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use geocog::S3RangeReaderAsync;
+    /// use cogrs::S3RangeReaderAsync;
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     /// let reader = S3RangeReaderAsync::new("s3://my-bucket/data/file.tif").await?;

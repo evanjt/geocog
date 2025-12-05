@@ -59,7 +59,7 @@ impl LocalRangeReader {
 /// # Example
 ///
 /// ```rust,ignore
-/// use geocog::{CogReader, MemoryRangeReader};
+/// use cogrs::{CogReader, MemoryRangeReader};
 /// use std::sync::Arc;
 ///
 /// let bytes = std::fs::read("path/to/file.tif")?;

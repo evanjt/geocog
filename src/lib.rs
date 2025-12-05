@@ -1,4 +1,4 @@
-//! # geocog - Pure Rust COG (Cloud Optimized GeoTIFF) Reader
+//! # cogrs - Pure Rust COG (Cloud Optimized GeoTIFF) Reader
 //!
 //! A high-performance library for reading Cloud Optimized GeoTIFFs without GDAL.
 //!
@@ -14,7 +14,7 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use geocog::CogReader;
+//! use cogrs::CogReader;
 //!
 //! let reader = CogReader::open("path/to/file.tif")?;
 //! let tile_data = reader.read_tile(10, 512, 384)?;

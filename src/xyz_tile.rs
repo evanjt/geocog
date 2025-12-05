@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use geocog::{CogReader, xyz_tile::{extract_xyz_tile, TileData}};
+//! use cogrs::{CogReader, xyz_tile::{extract_xyz_tile, TileData}};
 //!
 //! let reader = CogReader::open("path/to/cog.tif")?;
 //! let tile = extract_xyz_tile(&reader, 3, 7, 5, (256, 256))?;

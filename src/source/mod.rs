@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use geocog::source::{CogSource, LocalCogSource, LocalScanOptions, CogEntry};
+//! use cogrs::source::{CogSource, LocalCogSource, LocalScanOptions, CogEntry};
 //!
 //! // Discover COGs in a directory with default options (recursive)
 //! let source = LocalCogSource::scan("/path/to/data", LocalScanOptions::default())?;

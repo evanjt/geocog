@@ -94,7 +94,7 @@ impl S3ScanOptions {
 /// # Example
 ///
 /// ```rust,ignore
-/// use geocog::source::{S3CogSource, S3ScanOptions};
+/// use cogrs::source::{S3CogSource, S3ScanOptions};
 ///
 /// // Scan with default options
 /// let source = S3CogSource::scan("my-bucket", S3ScanOptions::default()).await?;
