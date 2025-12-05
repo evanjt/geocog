@@ -50,6 +50,8 @@ pub struct TileCache {
     current_bytes: usize,
     capacity_bytes: usize,
     entries: LruCache<TileKey, CacheEntry>,
+    hits: u64,
+    misses: u64,
 }
 
 impl TileCache {
@@ -58,11 +60,22 @@ impl TileCache {
             current_bytes: 0,
             capacity_bytes,
             entries: LruCache::unbounded(),
+            hits: 0,
+            misses: 0,
         }
     }
 
     fn get(&mut self, key: &TileKey) -> Option<Arc<Vec<f32>>> {
-        self.entries.get(key).map(|entry| Arc::clone(&entry.data))
+        match self.entries.get(key) {
+            Some(entry) => {
+                self.hits += 1;
+                Some(Arc::clone(&entry.data))
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
     }
 
     fn contains(&mut self, key: &TileKey) -> bool {
@@ -145,4 +158,10 @@ pub fn contains_legacy(path: &Path, _kind: TileKind, index: usize) -> bool {
 pub fn insert_legacy(path: &Path, _kind: TileKind, index: usize, data: Arc<Vec<f32>>) {
     let source = path.to_string_lossy();
     insert(&source, index, None, data);
+}
+
+/// Cache statistics: (entry_count, current_bytes, capacity_bytes, hits, misses)
+pub fn stats() -> (usize, usize, usize, u64, u64) {
+    let cache = TILE_CACHE.lock().unwrap();
+    (cache.entries.len(), cache.current_bytes, cache.capacity_bytes, cache.hits, cache.misses)
 }

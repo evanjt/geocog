@@ -26,7 +26,7 @@ flate2 = "1.0"
 zstd = "0.13"
 
 # Coordinate transforms
-geo = "0.29.0"
+geo = "0.31.0"
 proj4rs = { version = "0.1.9", features = ["crs-definitions"] }  # Pure Rust with EPSG database
 crs-definitions = "0.3.1"  # EPSG -> PROJ4 string lookups
 
