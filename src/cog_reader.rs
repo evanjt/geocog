@@ -446,16 +446,24 @@ impl CogReader {
         }
 
         // Apply the overview quality hint
+        // min_usable_overview = Some(n) means overviews 0..=n are usable
+        // min_usable_overview = None means NO overviews are usable (force full resolution)
         let min_usable_overview = match hint {
-            OverviewQualityHint::AllUsable => None, // None means all are usable
+            OverviewQualityHint::AllUsable => {
+                // All overviews are usable - set to last overview index
+                if overviews.is_empty() {
+                    None
+                } else {
+                    Some(overviews.len() - 1)
+                }
+            }
             OverviewQualityHint::NoneUsable => {
-                // Force full resolution by setting min_usable to beyond any valid index
-                // This triggers the fallback in best_overview_for_resolution
-                Some(usize::MAX)
+                // Force full resolution - no overviews are usable
+                None
             }
             OverviewQualityHint::MinUsable(n) => Some(n),
             OverviewQualityHint::ComputeAtRuntime => {
-                // Will be computed below
+                // Will be computed below, start with None
                 None
             }
         };
@@ -742,6 +750,123 @@ impl CogReader {
         tile_cache::insert(source_id, tile_index, None, Arc::new(result.clone()));
 
         Ok(result)
+    }
+
+    /// Read a single tile and return both data and bytes fetched from source
+    /// Returns (pixel_data, bytes_fetched) where bytes_fetched is the compressed size read from source
+    /// If tile was cached, bytes_fetched is 0 (no network I/O)
+    pub fn read_tile_with_bytes(&self, tile_index: usize) -> AnyResult<(Vec<f32>, usize)> {
+        let source_id = self.reader.identifier();
+
+        // Check cache first
+        if let Some(cached) = tile_cache::get(source_id, tile_index, None) {
+            return Ok(((*cached).clone(), 0)); // Cache hit = 0 bytes fetched
+        }
+
+        if tile_index >= self.metadata.tile_offsets.len() {
+            return Err(format!(
+                "Tile index {} out of range (max {})",
+                tile_index,
+                self.metadata.tile_offsets.len()
+            ).into());
+        }
+
+        let offset = self.metadata.tile_offsets[tile_index];
+        let byte_count = self.metadata.tile_byte_counts[tile_index] as usize;
+
+        if byte_count == 0 {
+            let pixel_count = self.metadata.tile_width * self.metadata.tile_height * self.metadata.bands;
+            return Ok((vec![f32::NAN; pixel_count], 0));
+        }
+
+        let compressed = self.reader.read_range(offset, byte_count)?;
+
+        let decompressed = decompress_tile(
+            &compressed,
+            self.metadata.compression,
+            self.metadata.tile_width,
+            self.metadata.tile_height,
+            self.metadata.bands,
+            self.metadata.data_type.bytes_per_sample(),
+        )?;
+
+        let unpredicted = apply_predictor(
+            &decompressed,
+            self.metadata.predictor,
+            self.metadata.tile_width,
+            self.metadata.bands,
+            self.metadata.data_type.bytes_per_sample(),
+        )?;
+
+        let result = convert_to_f32(
+            &unpredicted,
+            self.metadata.data_type,
+            self.metadata.little_endian,
+        )?;
+
+        tile_cache::insert(source_id, tile_index, None, Arc::new(result.clone()));
+
+        Ok((result, byte_count))
+    }
+
+    /// Read an overview tile and return both data and bytes fetched from source
+    /// Returns (pixel_data, bytes_fetched) where bytes_fetched is the compressed size read from source
+    /// If tile was cached, bytes_fetched is 0 (no network I/O)
+    pub fn read_overview_tile_with_bytes(&self, overview_idx: usize, tile_index: usize) -> AnyResult<(Vec<f32>, usize)> {
+        let source_id = self.reader.identifier();
+
+        // Check cache first
+        if let Some(cached) = tile_cache::get(source_id, tile_index, Some(overview_idx)) {
+            return Ok(((*cached).clone(), 0)); // Cache hit = 0 bytes fetched
+        }
+
+        let ovr = self.overviews.get(overview_idx)
+            .ok_or_else(|| format!("Overview index {overview_idx} out of range"))?;
+
+        if tile_index >= ovr.tile_offsets.len() {
+            return Err(format!(
+                "Tile index {} out of range (max {})",
+                tile_index,
+                ovr.tile_offsets.len()
+            ).into());
+        }
+
+        let offset = ovr.tile_offsets[tile_index];
+        let byte_count = ovr.tile_byte_counts[tile_index] as usize;
+
+        if byte_count == 0 {
+            let pixel_count = ovr.tile_width * ovr.tile_height * self.metadata.bands;
+            return Ok((vec![f32::NAN; pixel_count], 0));
+        }
+
+        let compressed = self.reader.read_range(offset, byte_count)?;
+
+        let decompressed = decompress_tile(
+            &compressed,
+            self.metadata.compression,
+            ovr.tile_width,
+            ovr.tile_height,
+            self.metadata.bands,
+            self.metadata.data_type.bytes_per_sample(),
+        )?;
+
+        let unpredicted = apply_predictor(
+            &decompressed,
+            self.metadata.predictor,
+            ovr.tile_width,
+            self.metadata.bands,
+            self.metadata.data_type.bytes_per_sample(),
+        )?;
+
+        let result = convert_to_f32(
+            &unpredicted,
+            self.metadata.data_type,
+            self.metadata.little_endian,
+        )?;
+
+        tile_cache::insert(source_id, tile_index, Some(overview_idx), Arc::new(result.clone()));
+
+        Ok((result, byte_count))
     }
 
     /// Sample a single pixel value
@@ -1504,14 +1629,75 @@ fn apply_predictor(
     match predictor {
         1 => Ok(data.to_vec()), // No predictor
         2 => {
-            // Horizontal differencing
+            // Horizontal differencing - accumulates at the SAMPLE level, not byte level
+            // For multi-byte samples, we add whole samples (as integers) not individual bytes
             let mut result = data.to_vec();
             let row_bytes = tile_width * bands * bytes_per_sample;
+            let samples_per_row = tile_width * bands;
 
             for row in result.chunks_mut(row_bytes) {
-                // Skip first pixel in each row
-                for i in bytes_per_sample..row.len() {
-                    row[i] = row[i].wrapping_add(row[i - bytes_per_sample]);
+                match bytes_per_sample {
+                    1 => {
+                        // 8-bit: byte-level accumulation
+                        for i in 1..row.len() {
+                            row[i] = row[i].wrapping_add(row[i - 1]);
+                        }
+                    }
+                    2 => {
+                        // 16-bit: accumulate as u16
+                        for i in 1..samples_per_row {
+                            let prev_offset = (i - 1) * 2;
+                            let curr_offset = i * 2;
+                            let prev = u16::from_le_bytes([row[prev_offset], row[prev_offset + 1]]);
+                            let curr = u16::from_le_bytes([row[curr_offset], row[curr_offset + 1]]);
+                            let sum = curr.wrapping_add(prev);
+                            row[curr_offset..curr_offset + 2].copy_from_slice(&sum.to_le_bytes());
+                        }
+                    }
+                    4 => {
+                        // 32-bit: accumulate as u32
+                        for i in 1..samples_per_row {
+                            let prev_offset = (i - 1) * 4;
+                            let curr_offset = i * 4;
+                            let prev = u32::from_le_bytes([
+                                row[prev_offset], row[prev_offset + 1],
+                                row[prev_offset + 2], row[prev_offset + 3],
+                            ]);
+                            let curr = u32::from_le_bytes([
+                                row[curr_offset], row[curr_offset + 1],
+                                row[curr_offset + 2], row[curr_offset + 3],
+                            ]);
+                            let sum = curr.wrapping_add(prev);
+                            row[curr_offset..curr_offset + 4].copy_from_slice(&sum.to_le_bytes());
+                        }
+                    }
+                    8 => {
+                        // 64-bit: accumulate as u64
+                        for i in 1..samples_per_row {
+                            let prev_offset = (i - 1) * 8;
+                            let curr_offset = i * 8;
+                            let prev = u64::from_le_bytes([
+                                row[prev_offset], row[prev_offset + 1],
+                                row[prev_offset + 2], row[prev_offset + 3],
+                                row[prev_offset + 4], row[prev_offset + 5],
+                                row[prev_offset + 6], row[prev_offset + 7],
+                            ]);
+                            let curr = u64::from_le_bytes([
+                                row[curr_offset], row[curr_offset + 1],
+                                row[curr_offset + 2], row[curr_offset + 3],
+                                row[curr_offset + 4], row[curr_offset + 5],
+                                row[curr_offset + 6], row[curr_offset + 7],
+                            ]);
+                            let sum = curr.wrapping_add(prev);
+                            row[curr_offset..curr_offset + 8].copy_from_slice(&sum.to_le_bytes());
+                        }
+                    }
+                    _ => {
+                        // Fallback for other sample sizes - byte-level accumulation
+                        for i in bytes_per_sample..row.len() {
+                            row[i] = row[i].wrapping_add(row[i - bytes_per_sample]);
+                        }
+                    }
                 }
             }
 
@@ -1928,4 +2114,129 @@ fn test_best_overview_selection() {
             idx
         );
     }
+}
+
+/// TEST: Horizontal differencing predictor (predictor=2) for multi-byte samples
+///
+/// This tests the fix for TIFF predictor=2 which requires sample-level accumulation
+/// for 16-bit, 32-bit, and 64-bit data types. The bug was performing byte-level
+/// accumulation which corrupted multi-byte values.
+///
+/// Reference: libtiff tif_predict.c casts to uint16_t/uint32_t/uint64_t and adds
+/// whole samples, not individual bytes.
+#[test]
+fn test_predictor2_multibyte_samples() {
+    // Test 16-bit horizontal differencing
+    // Input: [100, 0, 5, 0, 10, 0] represents [100, 5, 10] as u16 (little-endian)
+    // After predictor=2: [100, 105, 115]
+    let input_16: Vec<u8> = vec![100, 0, 5, 0, 10, 0]; // 3 u16 samples: 100, 5, 10
+    let result_16 = apply_predictor(&input_16, 2, 3, 1, 2).expect("predictor failed");
+
+    // Verify: first sample unchanged, others accumulated
+    let s0 = u16::from_le_bytes([result_16[0], result_16[1]]);
+    let s1 = u16::from_le_bytes([result_16[2], result_16[3]]);
+    let s2 = u16::from_le_bytes([result_16[4], result_16[5]]);
+
+    assert_eq!(s0, 100, "First sample should be unchanged");
+    assert_eq!(s1, 105, "Second sample should be 100 + 5 = 105");
+    assert_eq!(s2, 115, "Third sample should be 105 + 10 = 115");
+
+    // Test 32-bit horizontal differencing (e.g., Float32 stored as u32)
+    // Input: [1000, 50, 100] as u32 differences
+    let mut input_32: Vec<u8> = Vec::new();
+    input_32.extend_from_slice(&1000u32.to_le_bytes());
+    input_32.extend_from_slice(&50u32.to_le_bytes());
+    input_32.extend_from_slice(&100u32.to_le_bytes());
+
+    let result_32 = apply_predictor(&input_32, 2, 3, 1, 4).expect("predictor failed");
+
+    let s0_32 = u32::from_le_bytes([result_32[0], result_32[1], result_32[2], result_32[3]]);
+    let s1_32 = u32::from_le_bytes([result_32[4], result_32[5], result_32[6], result_32[7]]);
+    let s2_32 = u32::from_le_bytes([result_32[8], result_32[9], result_32[10], result_32[11]]);
+
+    assert_eq!(s0_32, 1000, "First u32 sample should be unchanged");
+    assert_eq!(s1_32, 1050, "Second u32 sample should be 1000 + 50 = 1050");
+    assert_eq!(s2_32, 1150, "Third u32 sample should be 1050 + 100 = 1150");
+
+    // Test 64-bit horizontal differencing (e.g., Float64)
+    let mut input_64: Vec<u8> = Vec::new();
+    input_64.extend_from_slice(&10000u64.to_le_bytes());
+    input_64.extend_from_slice(&500u64.to_le_bytes());
+    input_64.extend_from_slice(&1000u64.to_le_bytes());
+
+    let result_64 = apply_predictor(&input_64, 2, 3, 1, 8).expect("predictor failed");
+
+    let s0_64 = u64::from_le_bytes(result_64[0..8].try_into().unwrap());
+    let s1_64 = u64::from_le_bytes(result_64[8..16].try_into().unwrap());
+    let s2_64 = u64::from_le_bytes(result_64[16..24].try_into().unwrap());
+
+    assert_eq!(s0_64, 10000, "First u64 sample should be unchanged");
+    assert_eq!(s1_64, 10500, "Second u64 sample should be 10000 + 500 = 10500");
+    assert_eq!(s2_64, 11500, "Third u64 sample should be 10500 + 1000 = 11500");
+}
+
+/// TEST: Predictor=2 handles wrapping correctly
+///
+/// The predictor should use wrapping arithmetic to handle overflow cases
+/// that occur in differenced data.
+#[test]
+fn test_predictor2_wrapping_behavior() {
+    // Test u16 wrapping: 65535 + 1 = 0 (wraps)
+    let mut input: Vec<u8> = Vec::new();
+    input.extend_from_slice(&65535u16.to_le_bytes()); // First sample: max u16
+    input.extend_from_slice(&1u16.to_le_bytes());     // Delta: +1 (wraps to 0)
+
+    let result = apply_predictor(&input, 2, 2, 1, 2).expect("predictor failed");
+
+    let s0 = u16::from_le_bytes([result[0], result[1]]);
+    let s1 = u16::from_le_bytes([result[2], result[3]]);
+
+    assert_eq!(s0, 65535, "First sample unchanged");
+    assert_eq!(s1, 0, "Second sample should wrap: 65535 + 1 = 0");
+
+    // Test u32 wrapping
+    let mut input_32: Vec<u8> = Vec::new();
+    input_32.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+    input_32.extend_from_slice(&2u32.to_le_bytes());
+
+    let result_32 = apply_predictor(&input_32, 2, 2, 1, 4).expect("predictor failed");
+    let s1_32 = u32::from_le_bytes([result_32[4], result_32[5], result_32[6], result_32[7]]);
+    assert_eq!(s1_32, 1, "u32 should wrap: 0xFFFFFFFF + 2 = 1");
+}
+
+/// TEST: Multi-row predictor handling
+///
+/// Each row should be processed independently - predictor resets at row boundaries.
+#[test]
+fn test_predictor2_multirow() {
+    // 2 rows of 3 u16 samples each
+    let mut input: Vec<u8> = Vec::new();
+    // Row 1: [100, 10, 20] -> [100, 110, 130]
+    input.extend_from_slice(&100u16.to_le_bytes());
+    input.extend_from_slice(&10u16.to_le_bytes());
+    input.extend_from_slice(&20u16.to_le_bytes());
+    // Row 2: [200, 5, 15] -> [200, 205, 220]
+    input.extend_from_slice(&200u16.to_le_bytes());
+    input.extend_from_slice(&5u16.to_le_bytes());
+    input.extend_from_slice(&15u16.to_le_bytes());
+
+    let result = apply_predictor(&input, 2, 3, 1, 2).expect("predictor failed");
+
+    // Row 1 verification
+    let r1_s0 = u16::from_le_bytes([result[0], result[1]]);
+    let r1_s1 = u16::from_le_bytes([result[2], result[3]]);
+    let r1_s2 = u16::from_le_bytes([result[4], result[5]]);
+
+    assert_eq!(r1_s0, 100, "Row 1, sample 0");
+    assert_eq!(r1_s1, 110, "Row 1, sample 1: 100 + 10 = 110");
+    assert_eq!(r1_s2, 130, "Row 1, sample 2: 110 + 20 = 130");
+
+    // Row 2 verification - should restart from row's first sample
+    let r2_s0 = u16::from_le_bytes([result[6], result[7]]);
+    let r2_s1 = u16::from_le_bytes([result[8], result[9]]);
+    let r2_s2 = u16::from_le_bytes([result[10], result[11]]);
+
+    assert_eq!(r2_s0, 200, "Row 2, sample 0 (fresh start)");
+    assert_eq!(r2_s1, 205, "Row 2, sample 1: 200 + 5 = 205");
+    assert_eq!(r2_s2, 220, "Row 2, sample 2: 205 + 15 = 220");
 }

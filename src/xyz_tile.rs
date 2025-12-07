@@ -34,6 +34,12 @@ pub struct TileData {
     pub width: usize,
     /// Tile height
     pub height: usize,
+    /// Total bytes fetched from source (compressed, before decompression)
+    pub bytes_fetched: usize,
+    /// Number of internal COG tiles read to produce this output tile
+    pub tiles_read: usize,
+    /// Overview level used (None = full resolution, Some(n) = overview index)
+    pub overview_used: Option<usize>,
 }
 
 /// Bounding box in a coordinate reference system
@@ -264,6 +270,12 @@ fn extract_tile_with_overview(
         Some(tile_row * eff_tiles_across + tile_col)
     };
 
+    // Track min/max columns and rows to compute the full tile range
+    let mut min_col: Option<usize> = None;
+    let mut max_col: Option<usize> = None;
+    let mut min_row: Option<usize> = None;
+    let mut max_row: Option<usize> = None;
+
     // Sample corners and edges to find needed tiles (much faster than checking every pixel)
     let sample_points = [
         (0, 0), (tile_size_x - 1, 0), (0, tile_size_y - 1), (tile_size_x - 1, tile_size_y - 1),
@@ -291,13 +303,22 @@ fn extract_tile_with_overview(
         // src_px may equal exactly eff_width (e.g., 2620.0 for 2620-pixel overview)
         if src_px >= -1.0 && src_px < (eff_width + 1) as f64 &&
            src_py >= -1.0 && src_py < (eff_height + 1) as f64 {
+            // Track the tile col/row from actual pixel coordinates
+            let tile_col = (src_px_clamped as usize) / eff_tile_width;
+            let tile_row = (src_py_clamped as usize) / eff_tile_height;
+
+            min_col = Some(min_col.map_or(tile_col, |m| m.min(tile_col)));
+            max_col = Some(max_col.map_or(tile_col, |m| m.max(tile_col)));
+            min_row = Some(min_row.map_or(tile_row, |m| m.min(tile_row)));
+            max_row = Some(max_row.map_or(tile_row, |m| m.max(tile_row)));
+
             if let Some(idx) = tile_index_at_level(src_px_clamped as usize, src_py_clamped as usize) {
                 needed_tiles.insert(idx);
             }
         }
     }
 
-    // Also add tiles between the corners (for larger output areas)
+    // Fill in all tiles in the col/row bounding box
     let max_tile_count = if overview_idx.is_some() {
         let ovr = &reader.overviews[overview_idx.unwrap()];
         ovr.tile_offsets.len()
@@ -305,17 +326,10 @@ fn extract_tile_with_overview(
         metadata.tile_offsets.len()
     };
 
-    if needed_tiles.len() > 1 {
-        let min_tile = *needed_tiles.iter().min().unwrap_or(&0);
-        let max_tile = *needed_tiles.iter().max().unwrap_or(&0);
-        let min_col = min_tile % eff_tiles_across;
-        let max_col = max_tile % eff_tiles_across;
-        let min_row = min_tile / eff_tiles_across;
-        let max_row = max_tile / eff_tiles_across;
-
-        // Read all tiles in the range - with overviews this is usually few tiles
-        for row in min_row..=max_row {
-            for col in min_col..=max_col {
+    if let (Some(min_c), Some(max_c), Some(min_r), Some(max_r)) = (min_col, max_col, min_row, max_row) {
+        // Read all tiles in the col/row range
+        for row in min_r..=max_r {
+            for col in min_c..=max_c {
                 let idx = row * eff_tiles_across + col;
                 if idx < max_tile_count {
                     needed_tiles.insert(idx);
@@ -332,21 +346,30 @@ fn extract_tile_with_overview(
             bands: num_bands,
             width: tile_size_x,
             height: tile_size_y,
+            bytes_fetched: 0,
+            tiles_read: 0,
+            overview_used: overview_idx,
         });
     }
 
-    // Pre-load all needed tiles
+    // Pre-load all needed tiles and track bytes fetched
     let mut tile_data_cache: AHashMap<usize, Vec<f32>> = AHashMap::new();
+    let mut total_bytes_fetched: usize = 0;
+    let mut tiles_actually_read: usize = 0;
 
     for &tile_idx in &needed_tiles {
-        let tile_data = if let Some(ovr_idx) = overview_idx {
-            reader.read_overview_tile(ovr_idx, tile_idx)
+        let tile_result = if let Some(ovr_idx) = overview_idx {
+            reader.read_overview_tile_with_bytes(ovr_idx, tile_idx)
         } else {
-            reader.read_tile(tile_idx)
+            reader.read_tile_with_bytes(tile_idx)
         };
 
-        if let Ok(data) = tile_data {
+        if let Ok((data, bytes)) = tile_result {
             tile_data_cache.insert(tile_idx, data);
+            total_bytes_fetched += bytes;
+            if bytes > 0 {
+                tiles_actually_read += 1;
+            }
         }
     }
 
@@ -454,13 +477,20 @@ fn extract_tile_with_overview(
                 }
             }
         }
+
     }
+
+    // Drop sample_pixel closure
+    let _ = sample_pixel;
 
     Ok(TileData {
         pixels: pixel_data,
         bands: num_bands,
         width: tile_size_x,
         height: tile_size_y,
+        bytes_fetched: total_bytes_fetched,
+        tiles_read: tiles_actually_read,
+        overview_used: overview_idx,
     })
 }
 
