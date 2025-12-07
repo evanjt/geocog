@@ -1,53 +1,28 @@
 //! # cogrs - Pure Rust COG (Cloud Optimized GeoTIFF) Reader
 //!
-//! A high-performance library for reading Cloud Optimized GeoTIFFs without GDAL.
+//! A library for reading Cloud Optimized GeoTIFFs without GDAL.
 //!
 //! ## Features
 //!
-//! - **Zero GDAL dependency**: Pure Rust implementation, no system libraries needed
-//! - **Metadata-only initialization**: Reads only IFD headers on open (~5-20ms)
-//! - **Range requests**: Efficient partial reads from local files, HTTP, or S3
-//! - **Streaming**: Never loads entire file into memory
-//! - **Compression**: Supports DEFLATE, LZW, ZSTD, JPEG, and uncompressed
-//! - **Overviews**: Automatic pyramid level selection with quality validation
-//! - **Coordinate transforms**: Pure Rust proj4rs for CRS transformations
-//! - **Point queries**: Sample values at geographic coordinates
-//! - **XYZ tiles**: Extract map tiles with automatic reprojection
-//! - **Resampling**: Nearest neighbor, bilinear, and bicubic interpolation
-//! - **Caching**: Built-in LRU tile cache (configurable, default 512MB)
+//! - Pure Rust, no GDAL dependency
+//! - Range requests for local files, HTTP, and S3
+//! - Compression: DEFLATE, LZW, ZSTD, JPEG
+//! - Coordinate transforms via proj4rs
+//! - Point queries at geographic coordinates
+//! - XYZ tile extraction with resampling options
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
 //! use cogrs::{CogReader, PointQuery, extract_xyz_tile};
 //!
-//! // Open a COG from local file, HTTP, or S3
 //! let reader = CogReader::open("path/to/file.tif")?;
 //!
-//! // Sample pixel values at a geographic coordinate
+//! // Point query
 //! let result = reader.sample_lonlat(-122.4, 37.8)?;
-//! for (band, value) in &result.values {
-//!     println!("Band {}: {}", band, value);
-//! }
 //!
-//! // Extract an XYZ map tile
+//! // XYZ tile
 //! let tile = extract_xyz_tile(&reader, 10, 163, 395, (256, 256))?;
-//! println!("Tile has {} bands, {} pixels", tile.bands, tile.pixels.len());
-//! ```
-//!
-//! ## XYZ Tile Extraction with Resampling
-//!
-//! ```rust,ignore
-//! use cogrs::{CogReader, TileExtractor, ResamplingMethod};
-//!
-//! let reader = CogReader::open("satellite.tif")?;
-//!
-//! // Extract with bilinear resampling for smoother results
-//! let tile = TileExtractor::new(&reader)
-//!     .xyz(10, 163, 395)
-//!     .output_size(512, 512)
-//!     .resampling(ResamplingMethod::Bilinear)
-//!     .extract()?;
 //! ```
 //!
 //! ## Architecture
