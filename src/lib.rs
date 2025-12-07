@@ -54,4 +54,4 @@ pub use raster::RasterSource;
 pub use s3::{S3Config, S3RangeReaderAsync, S3RangeReaderSync};
 pub use tile_cache::TileCache;
 pub use source::{CogEntry, CogLocation, CogSource, LocalCogSource, LocalScanOptions, LocalSourceStats, S3CogSource, S3ScanOptions, S3SourceStats};
-pub use xyz_tile::{TileData, BoundingBox, CoordTransformer, extract_xyz_tile, extract_tile_with_extent};
+pub use xyz_tile::{TileData, TileExtractor, BoundingBox, CoordTransformer, extract_xyz_tile, extract_tile_with_extent};

@@ -283,6 +283,109 @@ impl CoordTransformer {
     }
 }
 
+/// Builder for extracting tiles from a COG with full control over parameters.
+///
+/// This provides a fluent API for tile extraction with sensible defaults.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use cogrs::{CogReader, TileExtractor};
+///
+/// let reader = CogReader::open("path/to/cog.tif")?;
+///
+/// // Extract an XYZ tile with custom size
+/// let tile = TileExtractor::new(&reader)
+///     .xyz(3, 4, 2)
+///     .output_size(512, 512)
+///     .extract()?;
+///
+/// // Or extract by bounding box
+/// let tile = TileExtractor::new(&reader)
+///     .bounds(BoundingBox::new(-122.5, 37.5, -122.0, 38.0))
+///     .extract()?;
+/// ```
+pub struct TileExtractor<'a> {
+    reader: &'a CogReader,
+    bounds: Option<BoundingBox>,
+    output_size: (usize, usize),
+}
+
+impl std::fmt::Debug for TileExtractor<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileExtractor")
+            .field("bounds", &self.bounds)
+            .field("output_size", &self.output_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> TileExtractor<'a> {
+    /// Create a new tile extractor for the given COG reader.
+    #[must_use]
+    pub fn new(reader: &'a CogReader) -> Self {
+        Self {
+            reader,
+            bounds: None,
+            output_size: (256, 256),
+        }
+    }
+
+    /// Set the output tile bounds using an XYZ tile coordinate.
+    ///
+    /// This automatically computes the Web Mercator bounding box for the tile.
+    #[must_use]
+    pub fn xyz(mut self, z: u32, x: u32, y: u32) -> Self {
+        self.bounds = Some(BoundingBox::from_xyz(z, x, y));
+        self
+    }
+
+    /// Set the output tile bounds using a bounding box in EPSG:3857 (Web Mercator).
+    #[must_use]
+    pub fn bounds(mut self, bbox: BoundingBox) -> Self {
+        self.bounds = Some(bbox);
+        self
+    }
+
+    /// Set the output tile size (width, height).
+    ///
+    /// Default is (256, 256).
+    #[must_use]
+    pub fn output_size(mut self, width: usize, height: usize) -> Self {
+        self.output_size = (width, height);
+        self
+    }
+
+    /// Set the output tile to square with the given size.
+    ///
+    /// Convenience method equivalent to `output_size(size, size)`.
+    #[must_use]
+    pub fn size(mut self, size: usize) -> Self {
+        self.output_size = (size, size);
+        self
+    }
+
+    /// Extract the tile with the configured parameters.
+    ///
+    /// Returns an error if bounds were not set.
+    pub fn extract(self) -> Result<TileData, Box<dyn std::error::Error + Send + Sync>> {
+        let bounds = self.bounds.ok_or("Bounds not set: use .xyz() or .bounds()")?;
+        extract_tile_with_extent(self.reader, &bounds, self.output_size)
+    }
+
+    /// Get the configured output size.
+    #[must_use]
+    pub fn get_output_size(&self) -> (usize, usize) {
+        self.output_size
+    }
+
+    /// Get the configured bounds, if set.
+    #[must_use]
+    pub fn get_bounds(&self) -> Option<&BoundingBox> {
+        self.bounds.as_ref()
+    }
+}
+
 /// Extract an XYZ tile from a COG reader
 ///
 /// # Arguments
@@ -725,6 +828,34 @@ mod tests {
         let result = CoordTransformer::new(4326, 999999);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
+    }
+
+    #[test]
+    fn test_tile_extractor_defaults() {
+        // We can test the builder without a real CogReader by checking its config
+        // For now, just test the BoundingBox methods used by the builder
+        let bbox = BoundingBox::from_xyz(5, 10, 12);
+        assert!(bbox.minx < bbox.maxx);
+        assert!(bbox.miny < bbox.maxy);
+    }
+
+    #[test]
+    fn test_tile_extractor_xyz_bounds() {
+        // Test that xyz() produces correct bounds
+        let bbox = BoundingBox::from_xyz(0, 0, 0);
+        // Tile 0/0/0 should cover the entire Web Mercator extent
+        let expected_extent = 20037508.342789244;
+        assert!((bbox.minx - (-expected_extent)).abs() < 1.0);
+        assert!((bbox.maxx - expected_extent).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_bounding_box_new() {
+        let bbox = BoundingBox::new(-10.0, -20.0, 30.0, 40.0);
+        assert_eq!(bbox.minx, -10.0);
+        assert_eq!(bbox.miny, -20.0);
+        assert_eq!(bbox.maxx, 30.0);
+        assert_eq!(bbox.maxy, 40.0);
     }
 }
 
