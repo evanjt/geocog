@@ -47,6 +47,7 @@ const GEO_KEY_PROJECTED_CRS: u16 = 3072;
 // Compression constants
 const COMPRESSION_NONE: u16 = 1;
 const COMPRESSION_LZW: u16 = 5;
+const COMPRESSION_JPEG: u16 = 7;
 const COMPRESSION_DEFLATE: u16 = 8;
 const COMPRESSION_ZSTD: u16 = 50000;
 
@@ -107,6 +108,7 @@ impl CogDataType {
 pub enum Compression {
     None,
     Lzw,
+    Jpeg,
     Deflate,
     Zstd,
 }
@@ -116,6 +118,7 @@ impl Compression {
         match value {
             COMPRESSION_NONE => Some(Compression::None),
             COMPRESSION_LZW => Some(Compression::Lzw),
+            COMPRESSION_JPEG => Some(Compression::Jpeg),
             COMPRESSION_DEFLATE | 32946 => Some(Compression::Deflate), // 32946 is old deflate
             COMPRESSION_ZSTD => Some(Compression::Zstd),
             _ => None,
@@ -1616,6 +1619,30 @@ fn decompress_tile(
             let decompressed = decoder.decode(compressed)?;
             Ok(decompressed)
         }
+        Compression::Jpeg => {
+            // JPEG decompression using the image crate
+            use image::ImageReader;
+            use std::io::Cursor;
+
+            let cursor = Cursor::new(compressed);
+            let reader = ImageReader::with_format(cursor, image::ImageFormat::Jpeg);
+            let img = reader.decode()
+                .map_err(|e| format!("JPEG decode error: {}", e))?;
+
+            // Convert to raw bytes based on the image type
+            let raw = match img {
+                image::DynamicImage::ImageRgb8(rgb) => rgb.into_raw(),
+                image::DynamicImage::ImageRgba8(rgba) => rgba.into_raw(),
+                image::DynamicImage::ImageLuma8(gray) => gray.into_raw(),
+                image::DynamicImage::ImageLumaA8(gray_alpha) => gray_alpha.into_raw(),
+                other => {
+                    // Convert other formats to RGB8
+                    other.to_rgb8().into_raw()
+                }
+            };
+
+            Ok(raw)
+        }
         Compression::Zstd => {
             let decompressed = zstd::stream::decode_all(compressed)?;
             Ok(decompressed)
@@ -1927,7 +1954,10 @@ mod tests {
     fn test_compression_detection() {
         assert_eq!(Compression::from_tag(1), Some(Compression::None));
         assert_eq!(Compression::from_tag(5), Some(Compression::Lzw));
+        assert_eq!(Compression::from_tag(7), Some(Compression::Jpeg));
         assert_eq!(Compression::from_tag(8), Some(Compression::Deflate));
+        assert_eq!(Compression::from_tag(50000), Some(Compression::Zstd));
+        assert_eq!(Compression::from_tag(999), None);
     }
 
     #[test]
