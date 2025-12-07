@@ -54,6 +54,7 @@ pub struct PointQueryResult {
 
 impl PointQueryResult {
     /// Get the value for a specific band, or None if band doesn't exist
+    #[inline]
     pub fn get(&self, band: usize) -> Option<f32> {
         self.values.get(&band).copied()
     }
@@ -68,6 +69,7 @@ impl PointQueryResult {
     }
 
     /// Check if any band has a valid (non-NaN) value
+    #[inline]
     pub fn has_valid_data(&self) -> bool {
         self.values.values().any(|v| !v.is_nan())
     }
@@ -78,6 +80,7 @@ impl PointQueryResult {
     }
 
     /// Iterate over (band_index, value) pairs
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &f32)> {
         self.values.iter()
     }

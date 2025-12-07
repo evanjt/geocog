@@ -1014,6 +1014,7 @@ impl CogReader {
 // Helper functions for reading TIFF data
 // ============================================================================
 
+#[inline]
 fn read_u16(bytes: &[u8], little_endian: bool) -> u16 {
     if little_endian {
         u16::from_le_bytes([bytes[0], bytes[1]])
@@ -1022,6 +1023,7 @@ fn read_u16(bytes: &[u8], little_endian: bool) -> u16 {
     }
 }
 
+#[inline]
 fn read_u32(bytes: &[u8], little_endian: bool) -> u32 {
     if little_endian {
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
@@ -1030,6 +1032,7 @@ fn read_u32(bytes: &[u8], little_endian: bool) -> u32 {
     }
 }
 
+#[inline]
 fn read_u64(bytes: &[u8], little_endian: bool) -> u64 {
     if little_endian {
         u64::from_le_bytes([
@@ -1044,6 +1047,7 @@ fn read_u64(bytes: &[u8], little_endian: bool) -> u64 {
     }
 }
 
+#[inline]
 fn read_f64(bytes: &[u8], little_endian: bool) -> f64 {
     if little_endian {
         f64::from_le_bytes([

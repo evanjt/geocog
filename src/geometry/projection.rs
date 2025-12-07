@@ -11,6 +11,7 @@
 ///
 /// # Returns
 /// Tuple of (x, y) in target CRS, or an error if the EPSG code is not supported.
+#[inline]
 pub fn project_point(source_epsg: i32, target_epsg: i32, x: f64, y: f64) -> Result<(f64, f64), String> {
     // No-op if same CRS
     if source_epsg == target_epsg {
@@ -21,16 +22,19 @@ pub fn project_point(source_epsg: i32, target_epsg: i32, x: f64, y: f64) -> Resu
 }
 
 /// Convenience function: longitude/latitude (EPSG:4326) to Web Mercator (EPSG:3857)
+#[inline]
 pub fn lon_lat_to_mercator(lon: f64, lat: f64) -> (f64, f64) {
     project_point(4326, 3857, lon, lat).unwrap_or((lon, lat))
 }
 
 /// Convenience function: Web Mercator (EPSG:3857) to longitude/latitude (EPSG:4326)
+#[inline]
 pub fn mercator_to_lon_lat(x: f64, y: f64) -> (f64, f64) {
     project_point(3857, 4326, x, y).unwrap_or((x, y))
 }
 
 /// Get PROJ4 string for an EPSG code using the crs-definitions database
+#[inline]
 pub fn get_proj_string(epsg: i32) -> Option<&'static str> {
     u16::try_from(epsg).ok()
         .and_then(crs_definitions::from_code)
@@ -38,6 +42,7 @@ pub fn get_proj_string(epsg: i32) -> Option<&'static str> {
 }
 
 /// Check if an EPSG code represents a geographic (lon/lat) CRS
+#[inline]
 pub fn is_geographic_crs(epsg: i32) -> bool {
     // Geographic CRS codes are typically in the 4000-4999 range
     // but we check the proj string to be sure

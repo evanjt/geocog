@@ -53,11 +53,13 @@ pub struct BoundingBox {
 
 impl BoundingBox {
     /// Create a new bounding box
+    #[inline]
     pub fn new(minx: f64, miny: f64, maxx: f64, maxy: f64) -> Self {
         Self { minx, miny, maxx, maxy }
     }
 
     /// Create bounding box from XYZ tile coordinates (Web Mercator EPSG:3857)
+    #[inline]
     pub fn from_xyz(z: u32, x: u32, y: u32) -> Self {
         let n = 2_u32.pow(z) as f64;
         let tile_size = 40_075_016.685_578_49 / n; // Web Mercator extent / tiles
@@ -226,24 +228,28 @@ impl CoordTransformer {
     }
 
     /// Get the source EPSG code.
+    #[inline]
     #[must_use]
     pub fn source_epsg(&self) -> i32 {
         self.source_epsg
     }
 
     /// Get the target EPSG code.
+    #[inline]
     #[must_use]
     pub fn target_epsg(&self) -> i32 {
         self.target_epsg
     }
 
     /// Check if source CRS is geographic (uses degrees).
+    #[inline]
     #[must_use]
     pub fn source_is_geographic(&self) -> bool {
         self.source_is_geographic
     }
 
     /// Check if target CRS is geographic (uses degrees).
+    #[inline]
     #[must_use]
     pub fn target_is_geographic(&self) -> bool {
         self.target_is_geographic
@@ -252,6 +258,7 @@ impl CoordTransformer {
     /// Transform coordinates from source CRS to target CRS.
     ///
     /// Handles radian/degree conversion automatically based on CRS types.
+    #[inline]
     pub fn transform(&self, x: f64, y: f64) -> Result<(f64, f64), String> {
         // Convert to radians if source is geographic
         let (in_x, in_y) = if self.source_is_geographic {
@@ -374,12 +381,14 @@ impl<'a> TileExtractor<'a> {
     }
 
     /// Get the configured output size.
+    #[inline]
     #[must_use]
     pub fn get_output_size(&self) -> (usize, usize) {
         self.output_size
     }
 
     /// Get the configured bounds, if set.
+    #[inline]
     #[must_use]
     pub fn get_bounds(&self) -> Option<&BoundingBox> {
         self.bounds.as_ref()
