@@ -46,6 +46,7 @@ pub mod xyz_tile;
 
 // Re-export main types
 pub use cog_reader::{CogReader, CogMetadata, CogDataType, Compression, GeoTransform, OverviewMetadata, OverviewQualityHint};
+pub use geometry::Point;
 pub use geometry::projection::{project_point, lon_lat_to_mercator, mercator_to_lon_lat, get_proj_string, is_geographic_crs};
 pub use point_query::{PointQuery, PointQueryResult, sample_point, sample_point_crs};
 pub use range_reader::{RangeReader, LocalRangeReader, HttpRangeReader, MemoryRangeReader, create_range_reader};
