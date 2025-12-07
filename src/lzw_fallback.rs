@@ -67,7 +67,7 @@ impl LzwRasterSource {
         .and_then(|values| values.first().copied())
         .unwrap_or(8) as usize;
 
-        if bits_per_sample % 8 != 0 {
+        if !bits_per_sample.is_multiple_of(8) {
             return Err(format!(
                 "Unsupported BitsPerSample value {bits_per_sample} (must be byte aligned)"
             )
@@ -75,9 +75,9 @@ impl LzwRasterSource {
         }
 
         let bytes_per_sample = bits_per_sample / 8;
-        if bytes_per_sample != 1 {
+        if bytes_per_sample != 1 && bytes_per_sample != 2 {
             return Err(format!(
-                "Unsupported bytes per sample {bytes_per_sample} (only 8-bit samples supported in fallback)"
+                "Unsupported bytes per sample {bytes_per_sample} (only 8-bit and 16-bit samples supported)"
             )
             .into());
         }
@@ -114,9 +114,9 @@ impl LzwRasterSource {
         .as_ref()
         .and_then(|values| values.first().copied())
         .unwrap_or(1) as u32;
-        if predictor != 1 && predictor != 2 {
+        if predictor != 1 && predictor != 2 && predictor != 3 {
             return Err(format!(
-                "Unsupported predictor {predictor} (only none and horizontal differencing supported)"
+                "Unsupported predictor {predictor} (only none, horizontal, and floating-point differencing supported)"
             )
             .into());
         }
@@ -338,11 +338,10 @@ impl LzwRasterSource {
                     continue;
                 }
                 // Skip NoData values
-                if let Some(nd) = nodata_f32 {
-                    if (value - nd).abs() < f32::EPSILON {
+                if let Some(nd) = nodata_f32
+                    && (value - nd).abs() < f32::EPSILON {
                         continue;
                     }
-                }
                 if value < min_value {
                     min_value = value;
                 }
@@ -546,6 +545,77 @@ fn apply_horizontal_predictor_u8(
     }
 }
 
+/// Apply horizontal predictor for 16-bit samples.
+/// Each sample is a u16, and accumulation must happen at the sample level.
+fn apply_horizontal_predictor_u16(
+    data: &mut [u8],
+    tile_width: usize,
+    tile_length: usize,
+    samples_per_pixel: usize,
+) {
+    if samples_per_pixel == 0 || tile_width == 0 {
+        return;
+    }
+
+    let samples_per_row = tile_width * samples_per_pixel;
+    let bytes_per_row = samples_per_row * 2;
+
+    for row in 0..tile_length {
+        let row_start = row * bytes_per_row;
+        // Start from sample 1 (sample 0 is the base)
+        for sample_idx in 1..samples_per_row {
+            let curr_offset = row_start + sample_idx * 2;
+            let prev_offset = row_start + (sample_idx - 1) * 2;
+
+            if curr_offset + 1 < data.len() && prev_offset + 1 < data.len() {
+                let prev = u16::from_le_bytes([data[prev_offset], data[prev_offset + 1]]);
+                let curr = u16::from_le_bytes([data[curr_offset], data[curr_offset + 1]]);
+                let sum = curr.wrapping_add(prev);
+                let bytes = sum.to_le_bytes();
+                data[curr_offset] = bytes[0];
+                data[curr_offset + 1] = bytes[1];
+            }
+        }
+    }
+}
+
+/// Apply floating-point predictor (predictor=3).
+/// Unlike predictor 2, this operates on bytes at the same position within
+/// each sample (e.g., all high bytes together, all low bytes together).
+fn apply_floating_point_predictor(
+    data: &mut [u8],
+    tile_width: usize,
+    tile_length: usize,
+    samples_per_pixel: usize,
+    bytes_per_sample: usize,
+) {
+    if samples_per_pixel == 0 || tile_width == 0 || bytes_per_sample == 0 {
+        return;
+    }
+
+    let samples_per_row = tile_width * samples_per_pixel;
+    let bytes_per_row = samples_per_row * bytes_per_sample;
+
+    for row in 0..tile_length {
+        let row_start = row * bytes_per_row;
+        let row_end = row_start + bytes_per_row;
+        if row_end > data.len() {
+            break;
+        }
+
+        // Process each byte position independently across all samples
+        for byte_pos in 0..bytes_per_sample {
+            for sample_idx in 1..samples_per_row {
+                let idx = row_start + sample_idx * bytes_per_sample + byte_pos;
+                let prev_idx = row_start + (sample_idx - 1) * bytes_per_sample + byte_pos;
+                if idx < data.len() && prev_idx < data.len() {
+                    data[idx] = data[idx].wrapping_add(data[prev_idx]);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct LzwPrefetchConfig {
     path: PathBuf,
@@ -558,6 +628,7 @@ struct LzwPrefetchConfig {
     bytes_per_sample: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decompress_lzw_tile(
     path: &Path,
     offsets: &[u64],
@@ -590,19 +661,57 @@ fn decompress_lzw_tile(
     let (mut decompressed, actual_bytes) =
         try_lzw_decompress(&compressed_data, expected_tile_bytes)?;
 
-    if predictor == 2 {
-        apply_horizontal_predictor_u8(
-            &mut decompressed,
-            tile_width,
-            tile_length,
-            samples_per_pixel,
-        );
+    match predictor {
+        2 => {
+            match bytes_per_sample {
+                1 => apply_horizontal_predictor_u8(
+                    &mut decompressed,
+                    tile_width,
+                    tile_length,
+                    samples_per_pixel,
+                ),
+                2 => apply_horizontal_predictor_u16(
+                    &mut decompressed,
+                    tile_width,
+                    tile_length,
+                    samples_per_pixel,
+                ),
+                _ => {} // Should not happen due to earlier validation
+            }
+        }
+        3 => {
+            apply_floating_point_predictor(
+                &mut decompressed,
+                tile_width,
+                tile_length,
+                samples_per_pixel,
+                bytes_per_sample,
+            );
+        }
+        _ => {} // predictor=1 means no prediction
     }
 
-    let mut values = vec![f32::NAN; tile_width * tile_length * samples_per_pixel];
-    let valid_samples = actual_bytes.min(decompressed.len()).min(values.len());
-    for idx in 0..valid_samples {
-        values[idx] = f32::from(decompressed[idx]);
+    let num_samples = tile_width * tile_length * samples_per_pixel;
+    let mut values = vec![f32::NAN; num_samples];
+
+    match bytes_per_sample {
+        1 => {
+            let valid_samples = actual_bytes.min(decompressed.len()).min(num_samples);
+            for idx in 0..valid_samples {
+                values[idx] = f32::from(decompressed[idx]);
+            }
+        }
+        2 => {
+            let valid_samples = (actual_bytes / 2).min(decompressed.len() / 2).min(num_samples);
+            for (idx, value_out) in values.iter_mut().enumerate().take(valid_samples) {
+                let offset = idx * 2;
+                if offset + 1 < decompressed.len() {
+                    let value = u16::from_le_bytes([decompressed[offset], decompressed[offset + 1]]);
+                    *value_out = f32::from(value);
+                }
+            }
+        }
+        _ => {} // Should not happen due to earlier validation
     }
 
     Ok(Arc::new(values))

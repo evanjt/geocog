@@ -137,11 +137,11 @@ impl S3CogSource {
             builder = builder.with_endpoint(endpoint);
         }
 
-        if let Some(access_key) = std::env::var("AWS_ACCESS_KEY_ID").ok() {
+        if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID") {
             builder = builder.with_access_key_id(&access_key);
         }
 
-        if let Some(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY").ok() {
+        if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY") {
             builder = builder.with_secret_access_key(&secret_key);
         }
 
@@ -166,11 +166,10 @@ impl S3CogSource {
 
         for meta in items {
             // Check max objects limit
-            if let Some(max) = options.max_objects {
-                if count >= max {
+            if let Some(max) = options.max_objects
+                && count >= max {
                     break;
                 }
-            }
 
             let key = meta.location.as_ref();
 
@@ -218,7 +217,7 @@ impl S3CogSource {
         let name = key
             .rsplit('/')
             .next()
-            .and_then(|f| f.rsplit('.').last())
+            .and_then(|f| f.rsplit('.').next_back())
             .unwrap_or("unknown")
             .to_string();
 
@@ -231,7 +230,7 @@ impl S3CogSource {
         let reader = S3RangeReaderSync::new(s3_url)?;
         let cog_reader = CogReader::from_reader(Arc::new(reader))?;
 
-        let size_bytes = Some(meta.size as u64);
+        let size_bytes = Some(meta.size);
         let last_modified = Some(meta.last_modified.into());
 
         CogEntry::from_reader(

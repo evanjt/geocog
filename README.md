@@ -6,7 +6,7 @@ Pure Rust COG (Cloud Optimized GeoTIFF) reader library.
 
 - Pure Rust, no GDAL dependency
 - Range requests for local files, HTTP, and S3
-- Compression: DEFLATE, LZW, ZSTD, JPEG
+- Compression: DEFLATE, LZW, ZSTD, JPEG, WebP
 - Coordinate transforms via proj4rs
 - Point queries at geographic coordinates
 - XYZ tile extraction with resampling options
@@ -24,11 +24,6 @@ let result = reader.sample_lonlat(-122.4, 37.8)?;
 // XYZ tile
 let tile = extract_xyz_tile(&reader, 10, 163, 395, (256, 256))?;
 ```
-
-## Limitations
-
-- LZW only supports 8-bit samples
-- Floating-point predictor (predictor=3) not supported
 
 ## License
 

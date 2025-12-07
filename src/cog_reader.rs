@@ -49,6 +49,7 @@ const COMPRESSION_NONE: u16 = 1;
 const COMPRESSION_LZW: u16 = 5;
 const COMPRESSION_JPEG: u16 = 7;
 const COMPRESSION_DEFLATE: u16 = 8;
+const COMPRESSION_WEBP: u16 = 50001;
 const COMPRESSION_ZSTD: u16 = 50000;
 
 // Sample format constants
@@ -111,6 +112,7 @@ pub enum Compression {
     Jpeg,
     Deflate,
     Zstd,
+    Webp,
 }
 
 impl Compression {
@@ -121,6 +123,7 @@ impl Compression {
             COMPRESSION_JPEG => Some(Compression::Jpeg),
             COMPRESSION_DEFLATE | 32946 => Some(Compression::Deflate), // 32946 is old deflate
             COMPRESSION_ZSTD => Some(Compression::Zstd),
+            COMPRESSION_WEBP => Some(Compression::Webp),
             _ => None,
         }
     }
@@ -294,8 +297,10 @@ impl OverviewMetadata {
 /// This allows callers to skip the expensive runtime analysis by providing
 /// a pre-computed value (e.g., from a database).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OverviewQualityHint {
     /// Compute at runtime (default behavior) - samples tiles to determine quality
+    #[default]
     ComputeAtRuntime,
     /// All overviews have sufficient data density
     AllUsable,
@@ -305,14 +310,9 @@ pub enum OverviewQualityHint {
     MinUsable(usize),
 }
 
-impl Default for OverviewQualityHint {
-    fn default() -> Self {
-        Self::ComputeAtRuntime
-    }
-}
 
 impl OverviewQualityHint {
-    /// Convert from database representation (Option<i32>)
+    /// Convert from database representation (`Option<i32>`)
     ///
     /// - `None` -> ComputeAtRuntime (legacy layers without pre-computed value)
     /// - `Some(-1)` -> NoneUsable (force full resolution)
@@ -329,7 +329,7 @@ impl OverviewQualityHint {
         }
     }
 
-    /// Convert to database representation (Option<i32>)
+    /// Convert to database representation (`Option<i32>`)
     #[must_use]
     pub fn to_db_value(&self) -> Option<i32> {
         match self {
@@ -1011,6 +1011,31 @@ impl CogReader {
             Ok((min, max))
         }
     }
+
+    /// Clone the reader for use in async tasks
+    ///
+    /// This creates a new `CogReader` that shares the same underlying `RangeReader`
+    /// and metadata, suitable for moving into async tasks or threads.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let reader = CogReader::open("path/to/cog.tif")?;
+    /// let reader_clone = reader.clone_for_async();
+    ///
+    /// tokio::spawn(async move {
+    ///     // Use reader_clone in async context
+    /// });
+    /// ```
+    #[must_use]
+    pub fn clone_for_async(&self) -> Self {
+        Self {
+            reader: Arc::clone(&self.reader),
+            metadata: self.metadata.clone(),
+            overviews: self.overviews.clone(),
+            min_usable_overview: self.min_usable_overview,
+        }
+    }
 }
 
 // ============================================================================
@@ -1647,6 +1672,30 @@ fn decompress_tile(
             let decompressed = zstd::stream::decode_all(compressed)?;
             Ok(decompressed)
         }
+        Compression::Webp => {
+            // WebP decompression using the image crate
+            use image::ImageReader;
+            use std::io::Cursor;
+
+            let cursor = Cursor::new(compressed);
+            let reader = ImageReader::with_format(cursor, image::ImageFormat::WebP);
+            let img = reader.decode()
+                .map_err(|e| format!("WebP decode error: {}", e))?;
+
+            // Convert to raw bytes based on the image type
+            let raw = match img {
+                image::DynamicImage::ImageRgb8(rgb) => rgb.into_raw(),
+                image::DynamicImage::ImageRgba8(rgba) => rgba.into_raw(),
+                image::DynamicImage::ImageLuma8(gray) => gray.into_raw(),
+                image::DynamicImage::ImageLumaA8(gray_alpha) => gray_alpha.into_raw(),
+                other => {
+                    // Convert other formats to RGB8
+                    other.to_rgb8().into_raw()
+                }
+            };
+
+            Ok(raw)
+        }
     }
 }
 
@@ -1957,6 +2006,7 @@ mod tests {
         assert_eq!(Compression::from_tag(7), Some(Compression::Jpeg));
         assert_eq!(Compression::from_tag(8), Some(Compression::Deflate));
         assert_eq!(Compression::from_tag(50000), Some(Compression::Zstd));
+        assert_eq!(Compression::from_tag(50001), Some(Compression::Webp));
         assert_eq!(Compression::from_tag(999), None);
     }
 
@@ -2367,6 +2417,68 @@ mod tests {
         assert_eq!(OverviewQualityHint::MinUsable(5).to_db_value(), Some(5));
         // ComputeAtRuntime returns None (no db value)
         assert_eq!(OverviewQualityHint::ComputeAtRuntime.to_db_value(), None);
+    }
+
+    /// Validates WebP decompression produces correct raw pixel data.
+    ///
+    /// WebP is a lossy/lossless image format that GDAL can use for COG tiles
+    /// (compression tag 50001). This test encodes a small RGB image as WebP,
+    /// then verifies that decompress_tile correctly decodes it back to raw RGB.
+    #[test]
+    fn test_webp_decompression() {
+        use image::{ImageBuffer, ImageFormat, Rgb, DynamicImage};
+        use std::io::Cursor;
+
+        // Create a 2x2 RGB test image with known pixel values
+        let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(2, 2);
+        img.put_pixel(0, 0, Rgb([255, 0, 0]));     // Red
+        img.put_pixel(1, 0, Rgb([0, 255, 0]));     // Green
+        img.put_pixel(0, 1, Rgb([0, 0, 255]));     // Blue
+        img.put_pixel(1, 1, Rgb([255, 255, 0]));   // Yellow
+
+        // Encode as WebP
+        let mut webp_data = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut webp_data, ImageFormat::WebP)
+            .expect("Failed to encode WebP");
+
+        // Decompress using our function
+        let result = decompress_tile(
+            webp_data.get_ref(),
+            Compression::Webp,
+            2,  // tile_width
+            2,  // tile_height
+            3,  // bands (RGB)
+            1,  // bytes_per_sample
+        ).expect("WebP decompression failed");
+
+        // Verify we got 12 bytes (2x2 pixels x 3 channels)
+        assert_eq!(result.len(), 12, "Expected 12 bytes for 2x2 RGB image");
+
+        // Verify pixel values (note: lossy compression may alter values slightly,
+        // but lossless WebP should preserve exact values)
+        // Row 0: [R, G, B, R, G, B] for pixels (0,0) and (1,0)
+        // Row 1: [R, G, B, R, G, B] for pixels (0,1) and (1,1)
+
+        // Red pixel (0,0)
+        assert!(result[0] > 200, "Red channel of red pixel should be high");
+        assert!(result[1] < 50, "Green channel of red pixel should be low");
+        assert!(result[2] < 50, "Blue channel of red pixel should be low");
+
+        // Green pixel (1,0)
+        assert!(result[3] < 50, "Red channel of green pixel should be low");
+        assert!(result[4] > 200, "Green channel of green pixel should be high");
+        assert!(result[5] < 50, "Blue channel of green pixel should be low");
+
+        // Blue pixel (0,1)
+        assert!(result[6] < 50, "Red channel of blue pixel should be low");
+        assert!(result[7] < 50, "Green channel of blue pixel should be low");
+        assert!(result[8] > 200, "Blue channel of blue pixel should be high");
+
+        // Yellow pixel (1,1)
+        assert!(result[9] > 200, "Red channel of yellow pixel should be high");
+        assert!(result[10] > 200, "Green channel of yellow pixel should be high");
+        assert!(result[11] < 50, "Blue channel of yellow pixel should be low");
     }
 }
 

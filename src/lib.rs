@@ -6,7 +6,7 @@
 //!
 //! - Pure Rust, no GDAL dependency
 //! - Range requests for local files, HTTP, and S3
-//! - Compression: DEFLATE, LZW, ZSTD, JPEG
+//! - Compression: DEFLATE, LZW, ZSTD, JPEG, WebP
 //! - Coordinate transforms via proj4rs
 //! - Point queries at geographic coordinates
 //! - XYZ tile extraction with resampling options
@@ -43,6 +43,7 @@
 // Public modules
 // ============================================================================
 
+pub mod async_tile;
 pub mod cog_reader;
 pub mod geometry;
 pub mod lzw_fallback;
@@ -94,6 +95,18 @@ pub use xyz_tile::{
     extract_xyz_tile,
     extract_tile_with_extent,
     extract_tile_with_extent_resampled,
+    extract_tile_with_bands,
+};
+
+// ============================================================================
+// Async Tile Extraction
+// ============================================================================
+
+pub use async_tile::{
+    AsyncTileExtractor,
+    extract_xyz_tile_async,
+    extract_tile_async,
+    extract_xyz_tiles_concurrent,
 };
 
 // ============================================================================

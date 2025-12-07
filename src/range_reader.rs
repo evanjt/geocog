@@ -84,7 +84,7 @@ impl MemoryRangeReader {
         }
     }
 
-    /// Create from an Arc<Vec<u8>> to avoid cloning large buffers
+    /// Create from an `Arc<Vec<u8>>` to avoid cloning large buffers
     pub fn from_arc(data: Arc<Vec<u8>>, identifier: String) -> Self {
         Self { data, identifier }
     }

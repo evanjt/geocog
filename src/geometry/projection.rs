@@ -50,7 +50,7 @@ pub fn is_geographic_crs(epsg: i32) -> bool {
         proj_str.contains("+proj=longlat")
     } else {
         // Fallback: assume 4326 and similar are geographic
-        epsg == 4326 || (epsg >= 4000 && epsg < 5000)
+        epsg == 4326 || (4000..5000).contains(&epsg)
     }
 }
 
