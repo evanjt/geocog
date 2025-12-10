@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::f64::consts::PI;
+use ahash::AHashMap;
 use proj4rs::proj::Proj;
 use proj4rs::transform::transform;
 
@@ -333,7 +334,7 @@ fn extract_tile_with_overview(
     }
 
     // Pre-load all needed tiles
-    let mut tile_data_cache: std::collections::HashMap<usize, Vec<f32>> = std::collections::HashMap::new();
+    let mut tile_data_cache: AHashMap<usize, Vec<f32>> = AHashMap::new();
 
     for &tile_idx in &needed_tiles {
         let tile_data = if let Some(ovr_idx) = overview_idx {
